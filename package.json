@@ -27,7 +27,8 @@
       "./packages/pi-btw/src/btw.ts",
       "./packages/pi-feedback/src/feedback.ts",
       "./packages/pi-head/src/head.ts",
-      "./packages/pi-system-prompt/src/dump-system-prompt.ts"
+      "./packages/pi-system-prompt/src/dump-system-prompt.ts",
+      "./packages/pi-draw/src/draw.ts"
     ],
     "skills": [
       "./skills"

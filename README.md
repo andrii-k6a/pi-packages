@@ -8,6 +8,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 
 | Package | Type | Description |
 |---------|------|-------------|
+| [@andrii-k6a/pi-draw](./packages/pi-draw/) | Extension | Open a tldraw canvas and attach drawings to the prompt (`/draw`, `Ctrl+Shift+C`) |
 | [@andrii-k6a/pi-btw](./packages/pi-btw/) | Extension | Side-question command `/btw` |
 | [@andrii-k6a/pi-feedback](./packages/pi-feedback/) | Extension | Review assistant replies in your editor and submit as feedback (`/feedback`) |
 | [@andrii-k6a/pi-system-prompt](./packages/pi-system-prompt/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`) |
@@ -56,6 +57,7 @@ Use the specific command from the table above for each package.
 <summary>Install commands by package</summary>
 
 ```bash
+pi install npm:@andrii-k6a/pi-draw
 pi install npm:@andrii-k6a/pi-btw
 pi install npm:@andrii-k6a/pi-feedback
 pi install npm:@andrii-k6a/pi-head
@@ -83,6 +85,7 @@ pi remove npm:@andrii-k6a/<package-name>
 <summary>Uninstall commands by package</summary>
 
 ```bash
+pi remove npm:@andrii-k6a/pi-draw
 pi remove npm:@andrii-k6a/pi-btw
 pi remove npm:@andrii-k6a/pi-feedback
 pi remove npm:@andrii-k6a/pi-head
