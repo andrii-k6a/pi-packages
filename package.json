@@ -29,7 +29,8 @@
       "./packages/pi-head/src/head.ts",
       "./packages/pi-system-prompt/src/dump-system-prompt.ts",
       "./packages/pi-draw/src/draw.ts",
-      "./packages/pi-tmux-branch/src/tmux-branch.ts"
+      "./packages/pi-tmux-branch/src/tmux-branch.ts",
+      "./packages/pi-telegram/src/telegram.ts"
     ],
     "skills": [
       "./skills"
