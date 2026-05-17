@@ -73,7 +73,7 @@ function defaultConfig(): Config {
   return { shortcuts: { ...DEFAULT_SHORTCUTS } };
 }
 
-function parseConfig(settings: unknown): Config {
+export function parseConfig(settings: unknown): Config {
   const config = defaultConfig();
 
   if (settings === undefined) {
