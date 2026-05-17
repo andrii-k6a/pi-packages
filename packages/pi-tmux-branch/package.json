@@ -1,0 +1,26 @@
+{
+  "name": "@andrii-k6a/pi-tmux-branch",
+  "version": "0.1.1",
+  "description": "Pi extension for branching the current session into a new tmux pane.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "tmux",
+    "branch"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/tmux-branch.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  }
+}
