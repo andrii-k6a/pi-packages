@@ -1,0 +1,28 @@
+{
+  "name": "@andrii-k6a/pi-ralph",
+  "version": "0.1.0",
+  "description": "Pi extension that implements the Ralph Loop.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "ralph",
+    "ralph-loop"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/ralph.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
