@@ -25,7 +25,8 @@
     "extensions": [
       "./packages/pi-ralph/src/ralph.ts",
       "./packages/pi-btw/src/btw.ts",
-      "./packages/pi-feedback/src/feedback.ts"
+      "./packages/pi-feedback/src/feedback.ts",
+      "./packages/pi-head/src/head.ts"
     ],
     "skills": [
       "./skills"

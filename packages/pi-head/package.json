@@ -1,0 +1,27 @@
+{
+  "name": "@andrii-k6a/pi-head",
+  "version": "0.1.0",
+  "description": "Pi extension that adds /head: a keyboard-scrollable viewer for the latest assistant response.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "head",
+    "viewer"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/head.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-tui": ">=0.74.0"
+  }
+}
