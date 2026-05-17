@@ -370,16 +370,6 @@ export default function reviewFeedbackExtension(pi: ExtensionAPI) {
     pendingReview = readPendingReviewFromBranch(ctx.sessionManager.getBranch());
   });
 
-  pi.on('before_agent_start', (event) => {
-    return {
-      systemPrompt:
-        event.systemPrompt +
-        `\n\n## Review feedback extension\n` +
-        `- The user can run /feedback to review your latest assistant message in their editor.\n` +
-        `- When review feedback is submitted, it arrives as a normal user message written in the user's voice and may include a unified diff plus additional notes. Treat that message as direct user feedback on your previous answer.`
-    };
-  });
-
   pi.registerCommand('feedback', {
     description: 'Review the latest assistant message in $EDITOR and stage the diff as feedback',
     handler: async (_args, ctx) => {
