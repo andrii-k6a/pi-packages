@@ -9,6 +9,8 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | Package | Type | Description |
 |---------|------|-------------|
 | [@andrii-k6a/pi-btw](./packages/pi-btw/) | Extension | Side-question command `/btw` |
+| [@andrii-k6a/pi-feedback](./packages/pi-feedback/) | Extension | Review assistant replies in your editor and submit as feedback (`/feedback`) |
+| [@andrii-k6a/pi-system-prompt](./packages/pi-system-prompt/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`) |
 | [@andrii-k6a/pi-head](./packages/pi-head/) | Extension | Keyboard-scrollable viewer for the latest response (`/head`) |
 | [@andrii-k6a/pi-ralph](./packages/pi-ralph/) | Extension | Ralph Loop |
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
@@ -55,8 +57,10 @@ Use the specific command from the table above for each package.
 
 ```bash
 pi install npm:@andrii-k6a/pi-btw
+pi install npm:@andrii-k6a/pi-feedback
 pi install npm:@andrii-k6a/pi-head
 pi install npm:@andrii-k6a/pi-ralph
+pi install npm:@andrii-k6a/pi-system-prompt
 ```
 
 </details>
@@ -80,8 +84,10 @@ pi remove npm:@andrii-k6a/<package-name>
 
 ```bash
 pi remove npm:@andrii-k6a/pi-btw
+pi remove npm:@andrii-k6a/pi-feedback
 pi remove npm:@andrii-k6a/pi-head
 pi remove npm:@andrii-k6a/pi-ralph
+pi remove npm:@andrii-k6a/pi-system-prompt
 ```
 
 </details>

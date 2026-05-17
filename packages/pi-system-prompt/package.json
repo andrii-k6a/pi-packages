@@ -1,0 +1,26 @@
+{
+  "name": "@andrii-k6a/pi-system-prompt",
+  "version": "0.1.0",
+  "description": "Pi extension that adds --dump-system-prompt to print the assembled system prompt and exit.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "system-prompt",
+    "dump-system-prompt"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/dump-system-prompt.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  }
+}
