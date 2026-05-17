@@ -24,7 +24,8 @@
   "pi": {
     "extensions": [
       "./packages/pi-ralph/src/ralph.ts",
-      "./packages/pi-btw/src/btw.ts"
+      "./packages/pi-btw/src/btw.ts",
+      "./packages/pi-feedback/src/feedback.ts"
     ],
     "skills": [
       "./skills"

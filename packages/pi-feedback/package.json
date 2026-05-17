@@ -1,0 +1,26 @@
+{
+  "name": "@andrii-k6a/pi-feedback",
+  "version": "0.2.0",
+  "description": "Pi extension to review assistant replies in the editor and submit a diff as feedback.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "feedback",
+    "review"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/feedback.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  }
+}
