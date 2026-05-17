@@ -1,0 +1,54 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+- This repo is an npm workspace with independent packages in `packages/*`.
+- Each package follows a consistent layout:
+  - `src/*` for the pi extension source code.
+  - `__tests__/` for Vitest tests (e.g., `index.test.ts`, `helpers.test.ts`).
+  - `README.md`, `package.json`, and `LICENSE` per package.
+- Root-level configs live in `biome.json`, `tsconfig.json`, and `vitest.config.ts`.
+- When adding a package, keep its `src/<name>.ts` entry registered in the root `package.json` under `pi.extensions` and listed in the package `files` field.
+
+## Build, Test, and Development Commands
+Run these from the repo root unless noted:
+- `npm install` — install all workspace dependencies.
+- `npm run lint` — Biome lint/format checks.
+- `npm run lint:fix` — auto-fixable Biome issues.
+- `npm run typecheck` — TypeScript type checking only.
+- `npm run test` — Vitest test suite.
+- `npm run check` — lint + typecheck.
+- `npm run check:ci` — CI-friendly Biome + typecheck.
+
+Local package testing:
+- `cd packages/<package-name>`
+- `pi -e .` — run the package in pi without installing.
+
+## Coding Style & Naming Conventions
+- Language: TypeScript.
+- Formatting: Biome with **spaces** (indent width 2) and `lineWidth` 100.
+- File naming: tests live in `__tests__` and use `*.test.ts`.
+- Package naming: `packages/pi-<name>` with npm scope `@andrii-k6a/pi-<name>`.
+
+## Testing Guidelines
+- Framework: Vitest (see `vitest.config.ts`).
+- Tests are per-package under `packages/*/__tests__/`.
+- Keep unit tests focused on extension behavior and helpers; prefer fast, isolated tests.
+
+## Commit & Pull Request Guidelines
+- Commit messages generally follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`. Older commits may use `Add …`; new commits should prefer the conventional style.
+- PRs should include:
+  - A short summary and the affected package(s).
+  - Tests run (e.g., `npm run test`, `npm run check`).
+  - Linked issues or context for behavior changes.
+  - Notes on any new configuration or environment variables.
+
+## Publishing & Release Safety
+- Publish with an OTP when 2FA is required: `npm publish --otp=<otp>`; never commit OTPs or npm credentials.
+- If npm shows a scoped package as private after first publish, set it public: `npm access public @andrii-k6a/<package-name>`.
+- Bump versions in the relevant `package.json` before publishing; keep root and package versions consistent.
+- Before publishing, do a dry run: `npm pack --dry-run` inside the package directory and verify the file list matches the `files` field.
+
+## Security & Configuration Tips
+- Do not commit API keys. Use environment variables or the config file locations documented in each package README.
+- If you change defaults or CLI flags, update the package README accordingly.
+- Tool schemas: avoid `Type.Unknown()` in tool parameters. It serializes to `{}`, which some inference backends reject as invalid JSON Schema. Prefer `Type.Object({}, { additionalProperties: true })`.
