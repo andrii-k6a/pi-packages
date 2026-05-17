@@ -8,8 +8,9 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 
 | Package | Type | Description |
 |---------|------|-------------|
-| [@andrii-k6a/pi-ralph](./packages/pi-ralph/) | Extension | Ralph Loop |
 | [@andrii-k6a/pi-btw](./packages/pi-btw/) | Extension | Side-question command `/btw` |
+| [@andrii-k6a/pi-head](./packages/pi-head/) | Extension | Keyboard-scrollable viewer for the latest response (`/head`) |
+| [@andrii-k6a/pi-ralph](./packages/pi-ralph/) | Extension | Ralph Loop |
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
 | [visual-explainer](./skills/visual-explainer/) | Skill | Generate visual HTML explanations |
@@ -53,6 +54,8 @@ Use the specific command from the table above for each package.
 <summary>Install commands by package</summary>
 
 ```bash
+pi install npm:@andrii-k6a/pi-btw
+pi install npm:@andrii-k6a/pi-head
 pi install npm:@andrii-k6a/pi-ralph
 ```
 
@@ -76,6 +79,8 @@ pi remove npm:@andrii-k6a/<package-name>
 <summary>Uninstall commands by package</summary>
 
 ```bash
+pi remove npm:@andrii-k6a/pi-btw
+pi remove npm:@andrii-k6a/pi-head
 pi remove npm:@andrii-k6a/pi-ralph
 ```
 
