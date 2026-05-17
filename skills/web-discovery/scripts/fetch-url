@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+# Fetch a URL and extract readable content with Defuddle, metadata with curl/python, or raw content with curl.
+# Defuddle is required only for extracted content and must already be installed on PATH.
+# Usage: scripts/fetch-url [--max-chars N] [--raw|--metadata] <url>
+
+set -euo pipefail
+
+MAX_CHARS="${FETCH_URL_MAX_CHARS:-24000}"
+TIMEOUT="${FETCH_URL_TIMEOUT:-20}"
+RAW=false
+METADATA=false
+URL=""
+
+usage() {
+  cat <<'EOF'
+Usage: fetch-url [OPTIONS] <url>
+
+Fetch a URL and print extracted readable content, metadata, or raw response body.
+
+Options:
+  --max-chars N   Maximum characters to print (default: $FETCH_URL_MAX_CHARS or 24000)
+  --timeout N     curl timeout in seconds for --raw/--metadata modes (default: $FETCH_URL_TIMEOUT or 20)
+  --raw           Print raw response body instead of Defuddle output
+  --metadata      Print concise page metadata using curl and python3
+  -h, --help      Show this help
+
+Requirements:
+  defuddle        Required for extracted content; must already be on PATH
+  curl            Required for --raw and --metadata modes
+  python3         Required for --metadata; optional for formatting Defuddle JSON output
+
+Install Defuddle explicitly, for example:
+  npm install -g --ignore-scripts defuddle@0.18.1
+
+Examples:
+  fetch-url https://example.com/article
+  fetch-url --max-chars 20000 https://docs.example.com/page
+  fetch-url --metadata https://example.com/article
+  fetch-url --raw https://example.com/data.json
+EOF
+}
+
+require_value() {
+  local option="$1"
+  local value="${2:-}"
+
+  if [[ -z "$value" || "$value" == -* ]]; then
+    echo "Error: $option requires a value" >&2
+    usage >&2
+    exit 2
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max-chars)
+      require_value "$1" "${2:-}"
+      MAX_CHARS="$2"
+      shift 2
+      ;;
+    --timeout)
+      require_value "$1" "${2:-}"
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    --raw)
+      RAW=true
+      shift
+      ;;
+    --metadata)
+      METADATA=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -* )
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -n "$URL" ]]; then
+        echo "Error: only one URL may be provided" >&2
+        usage >&2
+        exit 2
+      fi
+      URL="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$URL" ]]; then
+  usage >&2
+  exit 2
+fi
+
+if [[ "$RAW" == true && "$METADATA" == true ]]; then
+  echo "Error: use only one of --raw or --metadata" >&2
+  exit 2
+fi
+
+if ! [[ "$MAX_CHARS" =~ ^[0-9]+$ ]]; then
+  echo "Error: --max-chars must be a non-negative integer" >&2
+  exit 2
+fi
+
+if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
+  echo "Error: --timeout must be a non-negative integer" >&2
+  exit 2
+fi
+
+print_truncated_file() {
+  local file="$1"
+  head -c "$MAX_CHARS" "$file"
+  if [[ "$(wc -c < "$file")" -gt "$MAX_CHARS" ]]; then
+    printf '\n\n[truncated to %s characters]\n' "$MAX_CHARS"
+  fi
+}
+
+fetch_with_curl() {
+  local output_file="$1"
+  local effective_url=""
+  local err_file=""
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "Error: curl is required for this mode" >&2
+    exit 1
+  fi
+
+  err_file="$(mktemp)"
+  if effective_url="$(curl -fsSL \
+    --compressed \
+    --max-time "$TIMEOUT" \
+    --user-agent "Mozilla/5.0 (compatible; web-discovery-skill/1.0)" \
+    -w '%{url_effective}' \
+    "$URL" \
+    -o "$output_file" 2>"$err_file")"; then
+    rm -f "$err_file"
+    printf '%s' "$effective_url"
+    return 0
+  fi
+
+  echo "Warning: curl failed; retrying once with --http1.1" >&2
+  sed 's/^/curl: /' "$err_file" >&2
+  rm -f "$err_file"
+
+  curl -fsSL \
+    --http1.1 \
+    --compressed \
+    --max-time "$TIMEOUT" \
+    --user-agent "Mozilla/5.0 (compatible; web-discovery-skill/1.0)" \
+    -w '%{url_effective}' \
+    "$URL" \
+    -o "$output_file"
+}
+
+if [[ "$RAW" == true ]]; then
+  body_file="$(mktemp)"
+  trap 'rm -f "$body_file"' EXIT
+
+  fetch_with_curl "$body_file" >/dev/null
+  print_truncated_file "$body_file"
+  exit 0
+fi
+
+if [[ "$METADATA" == true ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is required for --metadata mode" >&2
+    exit 1
+  fi
+
+  body_file="$(mktemp)"
+  trap 'rm -f "$body_file"' EXIT
+
+  final_url="$(fetch_with_curl "$body_file")"
+
+  python3 - "$body_file" "$URL" "$final_url" "$MAX_CHARS" <<'PY'
+from html.parser import HTMLParser
+from pathlib import Path
+import html
+import json
+import re
+import sys
+
+path = Path(sys.argv[1])
+requested_url = sys.argv[2]
+final_url = sys.argv[3]
+max_chars = int(sys.argv[4])
+
+class MetadataParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_title = False
+        self.title_parts = []
+        self.meta = []
+        self.links = []
+        self.json_ld = []
+        self._script_type = ""
+        self._script_parts = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = {k.lower(): (v or "") for k, v in attrs}
+        tag = tag.lower()
+        if tag == "title":
+            self.in_title = True
+        elif tag == "meta":
+            self.meta.append(attrs)
+        elif tag == "link":
+            self.links.append(attrs)
+        elif tag == "script":
+            self._script_type = attrs.get("type", "").lower()
+            if self._script_type == "application/ld+json":
+                self._script_parts = []
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "title":
+            self.in_title = False
+        elif tag == "script" and self._script_type == "application/ld+json":
+            text = "".join(self._script_parts).strip()
+            if text:
+                self.json_ld.append(text)
+            self._script_type = ""
+            self._script_parts = []
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title_parts.append(data)
+        if self._script_type == "application/ld+json":
+            self._script_parts.append(data)
+
+def clean(value):
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        value = ", ".join(clean(item) for item in value if clean(item))
+    elif isinstance(value, dict):
+        value = value.get("name") or value.get("url") or ""
+    value = html.unescape(str(value))
+    return re.sub(r"\s+", " ", value).strip()
+
+def first_meta(parser, *keys):
+    wanted = {key.lower() for key in keys}
+    for attrs in parser.meta:
+        name = attrs.get("name", "").lower()
+        prop = attrs.get("property", "").lower()
+        itemprop = attrs.get("itemprop", "").lower()
+        if name in wanted or prop in wanted or itemprop in wanted:
+            value = clean(attrs.get("content"))
+            if value:
+                return value
+    return ""
+
+def first_link(parser, rel):
+    rel = rel.lower()
+    for attrs in parser.links:
+        rels = {part.lower() for part in attrs.get("rel", "").split()}
+        if rel in rels:
+            value = clean(attrs.get("href"))
+            if value:
+                return value
+    return ""
+
+def iter_jsonld(value):
+    if isinstance(value, list):
+        for item in value:
+            yield from iter_jsonld(item)
+    elif isinstance(value, dict):
+        yield value
+        graph = value.get("@graph")
+        if isinstance(graph, (list, dict)):
+            yield from iter_jsonld(graph)
+
+def pick_jsonld(parser):
+    objects = []
+    for text in parser.json_ld:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        objects.extend(iter_jsonld(data))
+
+    preferred = []
+    for obj in objects:
+        typ = obj.get("@type", "")
+        types = typ if isinstance(typ, list) else [typ]
+        if any(str(t).lower() in {"article", "newsarticle", "blogposting", "webpage"} for t in types):
+            preferred.append(obj)
+    return (preferred or objects or [{}])[0]
+
+try:
+    text = path.read_text(encoding="utf-8", errors="replace")
+except OSError as exc:
+    print(f"Error: could not read response body: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+parser = MetadataParser()
+parser.feed(text)
+jsonld = pick_jsonld(parser)
+
+fields = [
+    ("Requested URL", requested_url),
+    ("Final URL", final_url),
+    ("Title", clean(" ".join(parser.title_parts))),
+    ("Canonical", first_link(parser, "canonical")),
+    ("Description", first_meta(parser, "description")),
+    ("OG title", first_meta(parser, "og:title", "twitter:title")),
+    ("OG description", first_meta(parser, "og:description", "twitter:description")),
+    ("Site", first_meta(parser, "og:site_name", "application-name")),
+    ("Type", first_meta(parser, "og:type")),
+    ("Image", first_meta(parser, "og:image", "twitter:image")),
+    ("Published", first_meta(parser, "article:published_time", "date", "datepublished", "pubdate")),
+    ("Modified", first_meta(parser, "article:modified_time", "datemodified")),
+    ("JSON-LD headline", clean(jsonld.get("headline") or jsonld.get("name"))),
+    ("JSON-LD published", clean(jsonld.get("datePublished"))),
+    ("JSON-LD modified", clean(jsonld.get("dateModified"))),
+    ("JSON-LD author", clean(jsonld.get("author"))),
+    ("JSON-LD publisher", clean(jsonld.get("publisher"))),
+]
+
+lines = ["Metadata:"]
+seen = set()
+for label, value in fields:
+    value = clean(value)
+    if not value:
+        continue
+    key = (label, value)
+    if key in seen:
+        continue
+    seen.add(key)
+    lines.append(f"{label}: {value}")
+
+output = "\n".join(lines) + "\n"
+if len(output) > max_chars:
+    output = output[:max_chars].rstrip() + f"\n\n[truncated to {max_chars} characters]\n"
+
+print(output, end="")
+PY
+  exit 0
+fi
+
+if ! command -v defuddle >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+Error: defuddle is required for extracted content and was not found on PATH.
+
+Install it explicitly, for example:
+  npm install -g --ignore-scripts defuddle@0.18.1
+
+Or use --raw to fetch the response body without extraction.
+EOF
+  exit 1
+fi
+
+defuddle_file="$(mktemp)"
+trap 'rm -f "$defuddle_file"' EXIT
+
+if ! defuddle parse --json --markdown "$URL" > "$defuddle_file" 2>/dev/null; then
+  cat >&2 <<'EOF'
+Error: extracted fetching with Defuddle failed.
+Do not repeatedly retry the same URL. Try another source, use --metadata if page metadata is enough, or use --raw only if raw HTML/JSON is useful.
+EOF
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  print_truncated_file "$defuddle_file"
+  exit 0
+fi
+
+python3 - "$defuddle_file" "$URL" "$MAX_CHARS" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+url = sys.argv[2]
+max_chars = int(sys.argv[3])
+
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("Error: could not parse Defuddle JSON output.", file=sys.stderr)
+    print("Do not repeatedly retry the same URL. Try another source, use --metadata if page metadata is enough, or use --raw only if raw HTML/JSON is useful.", file=sys.stderr)
+    sys.exit(1)
+
+content = data.get("contentMarkdown") or data.get("content") or ""
+output = (
+    f"Title: {data.get('title') or '(unknown)'}\n"
+    f"URL: {url}\n"
+    f"Author: {data.get('author') or ''}\n"
+    f"Published: {data.get('published') or ''}\n"
+    f"Site: {data.get('site') or data.get('domain') or ''}\n"
+    f"Word count: {data.get('wordCount') or 0}\n"
+    "---\n"
+    f"{content.strip()}\n"
+)
+
+if len(output) > max_chars:
+    output = output[:max_chars].rstrip() + f"\n\n[truncated to {max_chars} characters]\n"
+
+print(output)
+PY

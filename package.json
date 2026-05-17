@@ -2,7 +2,7 @@
   "name": "pi-packages",
   "version": "0.0.1",
   "private": true,
-  "description": "Extensions for pi, the AI coding agent",
+  "description": "Extensions, skills, prompts, and themes for pi, the AI coding agent",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome check .",
@@ -25,6 +25,15 @@
     "extensions": [
       "./packages/pi-ralph/src/ralph.ts",
       "./packages/pi-btw/src/btw.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ],
+    "themes": [
+      "./themes"
     ]
   },
   "devDependencies": {
