@@ -4,6 +4,17 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /**
  * Adds `--dump-system-prompt` to Pi.
+ *
+ * Two execution paths:
+ *
+ * 1. **No-prompt path** (`pi --dump-system-prompt`): detected at extension-setup
+ *    time, before Pi starts its interactive TUI. A synthetic child process is
+ *    spawned with `-p dump` so turn-scoped hooks (e.g. `before_agent_start`)
+ *    run normally. The parent exits immediately; the TUI never initialises.
+ *
+ * 2. **Direct path** (`pi --dump-system-prompt -p "…"`): Pi runs in print mode.
+ *    The `context` hook captures `ctx.getSystemPrompt()` after the full
+ *    `before_agent_start` chain and exits before any provider/model request.
  */
 export default function dumpSystemPrompt(pi: ExtensionAPI) {
   pi.registerFlag('dump-system-prompt', {
@@ -20,20 +31,19 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
 
     // Use fd 1 directly. In print/JSON integrations Pi may wrap process.stdout,
     // but fd 1 remains the caller's stdout and is redirect-friendly.
-    writeSync(1, prompt.endsWith('\n') ? prompt : `${prompt}\n`);
+    writeAllSync(1, prompt.endsWith('\n') ? prompt : `${prompt}\n`);
     process.exit(0);
   };
 
   const enabled = () => pi.getFlag('dump-system-prompt') === true;
 
-  pi.on('session_start', () => {
-    if (!enabled()) return;
-
-    // If Pi already has an initial prompt, let that prompt start the turn.
-    if (hasInitialPrompt()) return;
-
+  if (
+    hasDumpSystemPromptFlag() &&
+    !hasInitialPrompt() &&
+    process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP !== '1'
+  ) {
     runSyntheticDumpTurn();
-  });
+  }
 
   pi.on('context', (_event, ctx) => {
     if (!enabled()) return;
@@ -44,32 +54,103 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
   });
 }
 
+/**
+ * Spawns a synthetic `-p dump` child process so Pi assembles a full turn
+ * context (including `before_agent_start` hooks) without the parent ever
+ * entering interactive TUI mode.
+ *
+ * The child is guarded by `PI_SYSTEM_PROMPT_SYNTHETIC_DUMP=1` to prevent
+ * recursive spawning. stdout/stderr are inherited so the child writes directly
+ * to the caller's file descriptors — no parent-side buffering needed.
+ */
 function runSyntheticDumpTurn(): never {
   const childArgs = [process.argv[1], ...process.argv.slice(2), '-p', 'dump'];
   const result = spawnSync(process.execPath, childArgs, {
     cwd: process.cwd(),
     env: { ...process.env, PI_SYSTEM_PROMPT_SYNTHETIC_DUMP: '1' },
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024 * 100
+    stdio: ['ignore', 'inherit', 'inherit']
   });
 
-  if (result.stdout) writeSync(1, result.stdout);
-
   if (result.error) {
-    writeSync(2, `pi-system-prompt: failed to run synthetic dump turn: ${result.error.message}\n`);
+    writeAllSync(
+      2,
+      `pi-system-prompt: failed to run synthetic dump turn: ${result.error.message}\n`
+    );
     process.exit(1);
   }
 
   if ((result.status ?? 1) !== 0) {
-    if (result.stderr) writeSync(2, result.stderr);
     process.exit(result.status ?? 1);
   }
 
   process.exit(0);
 }
 
-function hasInitialPrompt(): boolean {
-  const args = process.argv.slice(2);
+/**
+ * Writes all bytes of `data` to the given file descriptor, looping on partial
+ * writes and retrying on transient `EAGAIN`/`EWOULDBLOCK` errors.
+ *
+ * `fs.writeSync()` does not guarantee that all bytes are written in a single
+ * call (particularly when writing to a pipe). Ignoring the return value — as
+ * the original code did — caused output to be silently truncated at ~8 KB.
+ */
+export function writeAllSync(fd: number, data: string | Buffer): void {
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    let written: number;
+
+    try {
+      written = writeSync(fd, buffer, offset, buffer.length - offset);
+    } catch (error) {
+      if (isRetryableWriteError(error)) continue;
+      throw error;
+    }
+
+    if (written <= 0) {
+      throw new Error(`writeSync wrote ${written} bytes`);
+    }
+
+    offset += written;
+  }
+}
+
+/** Returns true for errors that indicate a non-blocking fd temporarily cannot accept writes. */
+function isRetryableWriteError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'EAGAIN' || error.code === 'EWOULDBLOCK')
+  );
+}
+
+/**
+ * Returns true if `--dump-system-prompt` (or `--dump-system-prompt=true`) is
+ * present in `process.argv`. Used at extension-setup time when `pi.getFlag()`
+ * is not yet populated.
+ */
+function hasDumpSystemPromptFlag(): boolean {
+  return process.argv.slice(2).some((arg) => {
+    if (arg === '--dump-system-prompt') return true;
+    if (arg.startsWith('--dump-system-prompt=')) return arg !== '--dump-system-prompt=false';
+    return false;
+  });
+}
+
+/**
+ * Returns true if `args` contains a user-supplied prompt (positional text,
+ * `@file`, `-p`/`--print` with piped stdin) that would cause Pi to start a
+ * real agent turn without the synthetic child.
+ *
+ * Exported for unit testing. Defaults to `process.argv.slice(2)` and
+ * `process.stdin.isTTY` so runtime callers need no arguments.
+ */
+export function hasInitialPrompt(
+  args = process.argv.slice(2),
+  stdinIsTTY = process.stdin.isTTY
+): boolean {
   const flagsWithRequiredValue = new Set([
     '--provider',
     '--model',
@@ -95,7 +176,7 @@ function hasInitialPrompt(): boolean {
     const arg = args[i];
 
     if (arg === '--dump-system-prompt') continue;
-    if ((arg === '--print' || arg === '-p') && !process.stdin.isTTY) return true;
+    if ((arg === '--print' || arg === '-p') && !stdinIsTTY) return true;
     if (arg.startsWith('@')) return true;
 
     if (arg === '--list-models') {
