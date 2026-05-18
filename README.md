@@ -14,7 +14,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-system-prompt](./packages/pi-system-prompt/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`) |
 | [@andrii-k6a/pi-head](./packages/pi-head/) | Extension | Keyboard-scrollable viewer for the latest response (`/head`) |
 | [@andrii-k6a/pi-ralph](./packages/pi-ralph/) | Extension | Ralph Loop |
-| [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current session into a new tmux pane (`/branch`) |
+| [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current Pi session into a new tmux pane (`/tmux-branch-*`) |
 | [@andrii-k6a/pi-telegram](./packages/pi-telegram/) | Extension | Telegram DM bridge — forward messages to/from pi via a Telegram bot |
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
