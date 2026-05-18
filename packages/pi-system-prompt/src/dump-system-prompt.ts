@@ -3,17 +3,18 @@ import { writeSync } from 'node:fs';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /**
- * Adds `--dump-system-prompt` to Pi.
+ * Adds `--dump-system-prompt` and `--dump-tools` to Pi.
  *
- * Two execution paths:
+ * Both flags share the same two execution paths:
  *
- * 1. **No-prompt path** (`pi --dump-system-prompt`): detected at extension-setup
- *    time, before Pi starts its interactive TUI. A synthetic child process is
- *    spawned with `-p dump` so turn-scoped hooks (e.g. `before_agent_start`)
- *    run normally. The parent exits immediately; the TUI never initialises.
+ * 1. **No-prompt path** (`pi --dump-system-prompt` / `pi --dump-tools`): detected
+ *    at extension-setup time, before Pi starts its interactive TUI. A synthetic
+ *    child process is spawned with `-p dump` so turn-scoped hooks (e.g.
+ *    `before_agent_start`) run normally. The parent exits immediately; the TUI
+ *    never initialises.
  *
- * 2. **Direct path** (`pi --dump-system-prompt -p "…"`): Pi runs in print mode.
- *    The `context` hook captures `ctx.getSystemPrompt()` after the full
+ * 2. **Direct path** (`pi --dump-system-prompt -p "…"` / `pi --dump-tools -p "…"`):
+ *    Pi runs in print mode. The `context` hook fires after the full
  *    `before_agent_start` chain and exits before any provider/model request.
  */
 export default function dumpSystemPrompt(pi: ExtensionAPI) {
@@ -23,22 +24,26 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
     default: false
   });
 
+  pi.registerFlag('dump-tools', {
+    description: 'Print all registered tools with descriptions and exit before calling the model',
+    type: 'boolean',
+    default: false
+  });
+
   let dumped = false;
 
-  const dumpAndExit = (prompt: string) => {
+  const dumpAndExit = (output: string) => {
     if (dumped) return;
     dumped = true;
 
     // Use fd 1 directly. In print/JSON integrations Pi may wrap process.stdout,
     // but fd 1 remains the caller's stdout and is redirect-friendly.
-    writeAllSync(1, prompt.endsWith('\n') ? prompt : `${prompt}\n`);
+    writeAllSync(1, output.endsWith('\n') ? output : `${output}\n`);
     process.exit(0);
   };
 
-  const enabled = () => pi.getFlag('dump-system-prompt') === true;
-
   if (
-    hasDumpSystemPromptFlag() &&
+    (hasDumpSystemPromptFlag() || hasDumpToolsFlag()) &&
     !hasInitialPrompt() &&
     process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP !== '1'
   ) {
@@ -46,12 +51,57 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
   }
 
   pi.on('context', (_event, ctx) => {
-    if (!enabled()) return;
-
     // context runs after the full before_agent_start chain and is awaited while
     // building the request context, so we exit before any provider/model call.
-    dumpAndExit(ctx.getSystemPrompt());
+    if (pi.getFlag('dump-system-prompt') === true) {
+      dumpAndExit(ctx.getSystemPrompt());
+    }
+    if (pi.getFlag('dump-tools') === true) {
+      dumpAndExit(formatTools(pi));
+    }
   });
+}
+
+/**
+ * Formats the full tool list as human-readable text suitable for stdout.
+ *
+ * Active tools (those enabled for the current turn) are listed first. Any
+ * tools that are registered but not active are appended under a separator.
+ * Each entry shows the tool name, its source (e.g. `builtin`, package name),
+ * and its description.
+ */
+export function formatTools(pi: ExtensionAPI): string {
+  const all = pi.getAllTools();
+  const activeSet = new Set(pi.getActiveTools());
+
+  const active = all.filter((t) => activeSet.has(t.name));
+  const inactive = all.filter((t) => !activeSet.has(t.name));
+
+  const lines: string[] = [];
+
+  const header =
+    inactive.length === 0
+      ? `Tools: ${active.length} active`
+      : `Tools: ${active.length} active, ${inactive.length} inactive (${all.length} total)`;
+  lines.push(header);
+
+  const appendTool = (tool: ReturnType<typeof pi.getAllTools>[number]) => {
+    lines.push('');
+    lines.push(`${tool.name} [${tool.sourceInfo.source}]`);
+    if (tool.description) {
+      lines.push(`  ${tool.description}`);
+    }
+  };
+
+  for (const tool of active) appendTool(tool);
+
+  if (inactive.length > 0) {
+    lines.push('');
+    lines.push('--- inactive ---');
+    for (const tool of inactive) appendTool(tool);
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -140,6 +190,19 @@ function hasDumpSystemPromptFlag(): boolean {
 }
 
 /**
+ * Returns true if `--dump-tools` (or `--dump-tools=true`) is present in
+ * `process.argv`. Used at extension-setup time when `pi.getFlag()` is not yet
+ * populated.
+ */
+function hasDumpToolsFlag(): boolean {
+  return process.argv.slice(2).some((arg) => {
+    if (arg === '--dump-tools') return true;
+    if (arg.startsWith('--dump-tools=')) return arg !== '--dump-tools=false';
+    return false;
+  });
+}
+
+/**
  * Returns true if `args` contains a user-supplied prompt (positional text,
  * `@file`, `-p`/`--print` with piped stdin) that would cause Pi to start a
  * real agent turn without the synthetic child.
@@ -176,6 +239,7 @@ export function hasInitialPrompt(
     const arg = args[i];
 
     if (arg === '--dump-system-prompt') continue;
+    if (arg === '--dump-tools') continue;
     if ((arg === '--print' || arg === '-p') && !stdinIsTTY) return true;
     if (arg.startsWith('@')) return true;
 

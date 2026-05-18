@@ -1,6 +1,9 @@
 # pi-system-prompt
 
-Pi extension that adds `--dump-system-prompt`: a CLI flag that prints Pi's assembled system prompt to stdout and exits before calling the model.
+Pi extension that adds two CLI flags that print Pi session internals to stdout and exit before calling the model:
+
+- `--dump-system-prompt` — the assembled system prompt
+- `--dump-tools` — all registered tools with descriptions and source
 
 ## Install
 
@@ -22,6 +25,8 @@ pi -e ./packages/pi-system-prompt
 
 ## Usage
 
+### System prompt
+
 Print the assembled system prompt:
 
 ```bash
@@ -34,17 +39,36 @@ Save it to a file:
 pi --dump-system-prompt > system-prompt.txt
 ```
 
-Provide your own prompt text:
+### Tools
+
+Print all registered tools (name, source, description):
+
+```bash
+pi --dump-tools
+```
+
+Save to a file:
+
+```bash
+pi --dump-tools > tools.txt
+```
+
+Active tools are listed first. If any tools are registered but disabled for the current turn, they appear under an `--- inactive ---` separator.
+
+### Providing your own prompt
+
+Both flags accept an explicit prompt:
 
 ```bash
 pi --dump-system-prompt -p "your prompt"
+pi --dump-tools -p "your prompt"
 ```
 
-If no prompt is given, the extension runs an internal synthetic `-p "dump"` turn so Pi still executes turn-scoped hooks like `before_agent_start`. The synthetic turn exits before any model request.
+Without an explicit prompt, the extension runs an internal synthetic `-p "dump"` turn so Pi still executes turn-scoped hooks like `before_agent_start`. The synthetic turn exits before any model request.
 
 ## What's included in the output
 
-The printed prompt reflects the full system prompt as Pi assembles it for that turn:
+**`--dump-system-prompt`** reflects the full system prompt as Pi assembles it for that turn:
 
 - Pi's built-in instructions
 - Loaded tools, skills, and context files
@@ -53,11 +77,17 @@ The printed prompt reflects the full system prompt as Pi assembles it for that t
 
 > **Note:** Provider-payload rewrites from `before_provider_request` hooks are not included — those run after the point where this extension captures the prompt.
 
+**`--dump-tools`** shows every tool registered for the session:
+
+- Tool name and the source it came from (e.g. `builtin`, package name)
+- Full description text
+- Active vs. inactive status
+
 ## Notes
 
-- Exits before any model request is made; no tokens are consumed.
-- When the flag is absent, the extension only performs cheap flag checks in event hooks.
-- Output is captured after the full `before_agent_start` chain, so turn-scoped system-prompt changes from other extensions are included.
+- Both flags exit before any model request is made; no tokens are consumed.
+- When a flag is absent, the extension only performs cheap flag checks in event hooks.
+- Output is captured after the full `before_agent_start` chain, so turn-scoped changes from other extensions are included.
 
 ## Uninstall
 

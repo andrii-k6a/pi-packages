@@ -14,7 +14,8 @@ vi.mock('node:fs', () => ({
 const {
   default: dumpSystemPrompt,
   writeAllSync,
-  hasInitialPrompt
+  hasInitialPrompt,
+  formatTools
 } = await import('../src/dump-system-prompt.js');
 
 describe('dumpSystemPrompt', () => {
@@ -65,9 +66,53 @@ describe('dumpSystemPrompt', () => {
   });
 });
 
+describe('dumpSystemPrompt --dump-tools synthetic turn', () => {
+  beforeEach(() => {
+    spawnSyncMock.mockReset();
+    writeSyncMock.mockReset();
+  });
+
+  it('runs the synthetic turn when --dump-tools is present without an initial prompt', () => {
+    const originalArgv = process.argv;
+    const originalSyntheticDump = process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: number | string | null
+    ) => {
+      throw new Error(`exit:${code ?? 0}`);
+    }) as never);
+
+    process.argv = ['node', '/usr/local/bin/pi', '--dump-tools'];
+    delete process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+    spawnSyncMock.mockReturnValue({ status: 0 });
+
+    const pi = { getFlag: vi.fn(() => false), on: vi.fn(), registerFlag: vi.fn() };
+
+    try {
+      expect(() => dumpSystemPrompt(pi as never)).toThrow('exit:0');
+    } finally {
+      process.argv = originalArgv;
+      if (originalSyntheticDump === undefined) delete process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+      else process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP = originalSyntheticDump;
+      exitSpy.mockRestore();
+    }
+
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      process.execPath,
+      ['/usr/local/bin/pi', '--dump-tools', '-p', 'dump'],
+      expect.objectContaining({
+        env: expect.objectContaining({ PI_SYSTEM_PROMPT_SYNTHETIC_DUMP: '1' })
+      })
+    );
+  });
+});
+
 describe('hasInitialPrompt', () => {
   it('returns false when only --dump-system-prompt is present', () => {
     expect(hasInitialPrompt(['--dump-system-prompt'], true)).toBe(false);
+  });
+
+  it('returns false when only --dump-tools is present', () => {
+    expect(hasInitialPrompt(['--dump-tools'], true)).toBe(false);
   });
 
   it('returns true for a bare positional prompt argument', () => {
@@ -130,5 +175,82 @@ describe('writeAllSync', () => {
     writeSyncMock.mockReturnValue(0);
 
     expect(() => writeAllSync(1, 'abc')).toThrow('writeSync wrote 0 bytes');
+  });
+});
+
+function makeTool(name: string, source: string, description = '') {
+  return {
+    name,
+    description,
+    parameters: {},
+    sourceInfo: { path: '', source, scope: 'user', origin: 'package' }
+  };
+}
+
+function makePi(tools: ReturnType<typeof makeTool>[], activeNames?: string[]) {
+  const active = activeNames ?? tools.map((t) => t.name);
+  return {
+    getAllTools: () => tools,
+    getActiveTools: () => active
+  } as never;
+}
+
+describe('formatTools', () => {
+  it('lists all active tools with name, source, and description', () => {
+    const pi = makePi([
+      makeTool('bash', 'builtin', 'Execute a bash command'),
+      makeTool('read', 'builtin', 'Read a file')
+    ]);
+
+    const output = formatTools(pi);
+
+    expect(output).toContain('Tools: 2 active');
+    expect(output).toContain('bash [builtin]');
+    expect(output).toContain('  Execute a bash command');
+    expect(output).toContain('read [builtin]');
+    expect(output).toContain('  Read a file');
+  });
+
+  it('separates inactive tools under a divider', () => {
+    const pi = makePi(
+      [
+        makeTool('bash', 'builtin', 'Execute a bash command'),
+        makeTool('some_tool', 'my-extension', 'Inactive tool')
+      ],
+      ['bash']
+    );
+
+    const output = formatTools(pi);
+
+    expect(output).toContain('Tools: 1 active, 1 inactive (2 total)');
+    expect(output).toContain('bash [builtin]');
+    expect(output).toContain('--- inactive ---');
+    expect(output).toContain('some_tool [my-extension]');
+  });
+
+  it('omits the inactive section when all tools are active', () => {
+    const pi = makePi([makeTool('bash', 'builtin', 'Execute a bash command')]);
+
+    const output = formatTools(pi);
+
+    expect(output).not.toContain('inactive');
+    expect(output).not.toContain('---');
+  });
+
+  it('handles tools without a description', () => {
+    const pi = makePi([makeTool('silent_tool', 'builtin')]);
+
+    const output = formatTools(pi);
+
+    expect(output).toContain('silent_tool [builtin]');
+    // No indented blank description line anywhere in the output
+    expect(output).not.toMatch(/^\s+$/m);
+  });
+
+  it('ends with a newline when written via dumpAndExit', () => {
+    const pi = makePi([makeTool('bash', 'builtin', 'Execute a bash command')]);
+    const output = formatTools(pi);
+    // writeAllSync appends \n if missing — verify output itself doesn't double-newline
+    expect(output).not.toMatch(/\n\n$/);
   });
 });
