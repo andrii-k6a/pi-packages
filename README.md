@@ -20,14 +20,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
 | [visual-explainer](./skills/visual-explainer/) | Skill | Generate visual HTML explanations |
 | [web-discovery](./skills/web-discovery/) | Skill | Browserless web search via local SearXNG + Defuddle |
-| [diff-review](./prompts/diff-review.md) | Prompt | Review a diff |
-| [fact-check](./prompts/fact-check.md) | Prompt | Fact-check a claim |
-| [generate-slides](./prompts/generate-slides.md) | Prompt | Generate a slide deck |
-| [generate-visual-plan](./prompts/generate-visual-plan.md) | Prompt | Generate a visual plan |
-| [generate-web-diagram](./prompts/generate-web-diagram.md) | Prompt | Generate a web diagram |
 | [grill-me](./prompts/grill-me.md) | Prompt | Socratic questioning |
-| [plan-review](./prompts/plan-review.md) | Prompt | Review a plan |
-| [project-recap](./prompts/project-recap.md) | Prompt | Recap a project |
 | [tokyonight](./themes/tokyonight.json) | Theme | Tokyo Night color theme |
 
 Each package has its own README with setup instructions, usage, and configuration details.
