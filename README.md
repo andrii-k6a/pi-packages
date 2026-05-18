@@ -38,61 +38,11 @@ Or try without installing:
 pi -e git:github.com/andrii-k6a/pi-packages
 ```
 
-## Install One Package
-
-Install a single package via npm:
-
-```bash
-pi install npm:@andrii-k6a/<package-name>
-```
-
-Use the specific command from the table above for each package.
-
-<details>
-<summary>Install commands by package</summary>
-
-```bash
-pi install npm:@andrii-k6a/pi-draw
-pi install npm:@andrii-k6a/pi-btw
-pi install npm:@andrii-k6a/pi-feedback
-pi install npm:@andrii-k6a/pi-head
-pi install npm:@andrii-k6a/pi-ralph
-pi install npm:@andrii-k6a/pi-system-prompt
-pi install npm:@andrii-k6a/pi-tmux-branch
-pi install npm:@andrii-k6a/pi-telegram
-```
-
-</details>
-
 ## Uninstall
-
-If installed via git:
 
 ```bash
 pi remove git:github.com/andrii-k6a/pi-packages
 ```
-
-If installed individually via npm:
-
-```bash
-pi remove npm:@andrii-k6a/<package-name>
-```
-
-<details>
-<summary>Uninstall commands by package</summary>
-
-```bash
-pi remove npm:@andrii-k6a/pi-draw
-pi remove npm:@andrii-k6a/pi-btw
-pi remove npm:@andrii-k6a/pi-feedback
-pi remove npm:@andrii-k6a/pi-head
-pi remove npm:@andrii-k6a/pi-ralph
-pi remove npm:@andrii-k6a/pi-system-prompt
-pi remove npm:@andrii-k6a/pi-tmux-branch
-pi remove npm:@andrii-k6a/pi-telegram
-```
-
-</details>
 
 ### Testing locally
 

@@ -42,12 +42,6 @@ Local package testing:
   - Linked issues or context for behavior changes.
   - Notes on any new configuration or environment variables.
 
-## Publishing & Release Safety
-- Publish with an OTP when 2FA is required: `npm publish --otp=<otp>`; never commit OTPs or npm credentials.
-- If npm shows a scoped package as private after first publish, set it public: `npm access public @andrii-k6a/<package-name>`.
-- Bump versions in the relevant `package.json` before publishing; keep root and package versions consistent.
-- Before publishing, do a dry run: `npm pack --dry-run` inside the package directory and verify the file list matches the `files` field.
-
 ## Security & Configuration Tips
 - Do not commit API keys. Use environment variables or the config file locations documented in each package README.
 - If you change defaults or CLI flags, update the package README accordingly.
