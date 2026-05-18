@@ -11,7 +11,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-draw](./packages/pi-draw/) | Extension | Open a tldraw canvas and attach drawings to the prompt (`/draw`, `Ctrl+Shift+C`) |
 | [@andrii-k6a/pi-btw](./packages/pi-btw/) | Extension | Side-question command `/btw` |
 | [@andrii-k6a/pi-feedback](./packages/pi-feedback/) | Extension | Review assistant replies in your editor and submit as feedback (`/feedback`) |
-| [@andrii-k6a/pi-system-prompt](./packages/pi-system-prompt/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`) |
+| [@andrii-k6a/pi-inspect](./packages/pi-inspect/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`, `--dump-tools`) |
 | [@andrii-k6a/pi-head](./packages/pi-head/) | Extension | Keyboard-scrollable viewer for the latest response (`/head`) |
 | [@andrii-k6a/pi-ralph](./packages/pi-ralph/) | Extension | Ralph Loop |
 | [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current Pi session into a new tmux pane (`/tmux-branch-*`) |

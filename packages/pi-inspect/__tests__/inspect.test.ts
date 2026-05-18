@@ -16,7 +16,7 @@ const {
   writeAllSync,
   hasInitialPrompt,
   formatTools
-} = await import('../src/dump-system-prompt.js');
+} = await import('../src/inspect.js');
 
 describe('dumpSystemPrompt', () => {
   beforeEach(() => {
@@ -26,7 +26,7 @@ describe('dumpSystemPrompt', () => {
 
   it('runs the synthetic no-prompt dump during extension setup before flag values are available', () => {
     const originalArgv = process.argv;
-    const originalSyntheticDump = process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+    const originalSyntheticDump = process.env.PI_INSPECT_SYNTHETIC_DUMP;
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((
       code?: number | string | null
     ) => {
@@ -34,7 +34,7 @@ describe('dumpSystemPrompt', () => {
     }) as never);
 
     process.argv = ['node', '/usr/local/bin/pi', '--dump-system-prompt'];
-    delete process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+    delete process.env.PI_INSPECT_SYNTHETIC_DUMP;
     spawnSyncMock.mockReturnValue({ status: 0 });
 
     const pi = {
@@ -48,9 +48,9 @@ describe('dumpSystemPrompt', () => {
     } finally {
       process.argv = originalArgv;
       if (originalSyntheticDump === undefined) {
-        delete process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+        delete process.env.PI_INSPECT_SYNTHETIC_DUMP;
       } else {
-        process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP = originalSyntheticDump;
+        process.env.PI_INSPECT_SYNTHETIC_DUMP = originalSyntheticDump;
       }
       exitSpy.mockRestore();
     }
@@ -59,7 +59,7 @@ describe('dumpSystemPrompt', () => {
       process.execPath,
       ['/usr/local/bin/pi', '--dump-system-prompt', '-p', 'dump'],
       expect.objectContaining({
-        env: expect.objectContaining({ PI_SYSTEM_PROMPT_SYNTHETIC_DUMP: '1' })
+        env: expect.objectContaining({ PI_INSPECT_SYNTHETIC_DUMP: '1' })
       })
     );
     expect(pi.on).not.toHaveBeenCalledWith('session_start', expect.any(Function));
@@ -74,7 +74,7 @@ describe('dumpSystemPrompt --dump-tools synthetic turn', () => {
 
   it('runs the synthetic turn when --dump-tools is present without an initial prompt', () => {
     const originalArgv = process.argv;
-    const originalSyntheticDump = process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+    const originalSyntheticDump = process.env.PI_INSPECT_SYNTHETIC_DUMP;
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((
       code?: number | string | null
     ) => {
@@ -82,7 +82,7 @@ describe('dumpSystemPrompt --dump-tools synthetic turn', () => {
     }) as never);
 
     process.argv = ['node', '/usr/local/bin/pi', '--dump-tools'];
-    delete process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
+    delete process.env.PI_INSPECT_SYNTHETIC_DUMP;
     spawnSyncMock.mockReturnValue({ status: 0 });
 
     const pi = { getFlag: vi.fn(() => false), on: vi.fn(), registerFlag: vi.fn() };
@@ -91,8 +91,8 @@ describe('dumpSystemPrompt --dump-tools synthetic turn', () => {
       expect(() => dumpSystemPrompt(pi as never)).toThrow('exit:0');
     } finally {
       process.argv = originalArgv;
-      if (originalSyntheticDump === undefined) delete process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP;
-      else process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP = originalSyntheticDump;
+      if (originalSyntheticDump === undefined) delete process.env.PI_INSPECT_SYNTHETIC_DUMP;
+      else process.env.PI_INSPECT_SYNTHETIC_DUMP = originalSyntheticDump;
       exitSpy.mockRestore();
     }
 
@@ -100,7 +100,7 @@ describe('dumpSystemPrompt --dump-tools synthetic turn', () => {
       process.execPath,
       ['/usr/local/bin/pi', '--dump-tools', '-p', 'dump'],
       expect.objectContaining({
-        env: expect.objectContaining({ PI_SYSTEM_PROMPT_SYNTHETIC_DUMP: '1' })
+        env: expect.objectContaining({ PI_INSPECT_SYNTHETIC_DUMP: '1' })
       })
     );
   });

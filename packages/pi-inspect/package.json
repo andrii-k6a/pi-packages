@@ -1,13 +1,13 @@
 {
-  "name": "@andrii-k6a/pi-system-prompt",
+  "name": "@andrii-k6a/pi-inspect",
   "version": "0.1.0",
-  "description": "Pi extension that adds --dump-system-prompt and --dump-tools to print Pi session internals and exit.",
+  "description": "Pi extension that adds --dump-system-prompt and --dump-tools to inspect Pi session internals and exit.",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
     "pi",
-    "system-prompt",
+    "inspect",
     "dump-system-prompt",
     "dump-tools"
   ],
@@ -18,7 +18,7 @@
   ],
   "pi": {
     "extensions": [
-      "./src/dump-system-prompt.ts"
+      "./src/inspect.ts"
     ]
   },
   "peerDependencies": {

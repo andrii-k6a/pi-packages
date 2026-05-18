@@ -45,7 +45,7 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
   if (
     (hasDumpSystemPromptFlag() || hasDumpToolsFlag()) &&
     !hasInitialPrompt() &&
-    process.env.PI_SYSTEM_PROMPT_SYNTHETIC_DUMP !== '1'
+    process.env.PI_INSPECT_SYNTHETIC_DUMP !== '1'
   ) {
     runSyntheticDumpTurn();
   }
@@ -109,7 +109,7 @@ export function formatTools(pi: ExtensionAPI): string {
  * context (including `before_agent_start` hooks) without the parent ever
  * entering interactive TUI mode.
  *
- * The child is guarded by `PI_SYSTEM_PROMPT_SYNTHETIC_DUMP=1` to prevent
+ * The child is guarded by `PI_INSPECT_SYNTHETIC_DUMP=1` to prevent
  * recursive spawning. stdout/stderr are inherited so the child writes directly
  * to the caller's file descriptors — no parent-side buffering needed.
  */
@@ -117,15 +117,12 @@ function runSyntheticDumpTurn(): never {
   const childArgs = [process.argv[1], ...process.argv.slice(2), '-p', 'dump'];
   const result = spawnSync(process.execPath, childArgs, {
     cwd: process.cwd(),
-    env: { ...process.env, PI_SYSTEM_PROMPT_SYNTHETIC_DUMP: '1' },
+    env: { ...process.env, PI_INSPECT_SYNTHETIC_DUMP: '1' },
     stdio: ['ignore', 'inherit', 'inherit']
   });
 
   if (result.error) {
-    writeAllSync(
-      2,
-      `pi-system-prompt: failed to run synthetic dump turn: ${result.error.message}\n`
-    );
+    writeAllSync(2, `pi-inspect: failed to run synthetic dump turn: ${result.error.message}\n`);
     process.exit(1);
   }
 
