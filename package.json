@@ -30,7 +30,8 @@
       "./packages/pi-inspect/src/inspect.ts",
       "./packages/pi-draw/src/draw.ts",
       "./packages/pi-tmux-branch/src/tmux-branch.ts",
-      "./packages/pi-telegram/src/telegram.ts"
+      "./packages/pi-telegram/src/telegram.ts",
+      "./packages/pi-dynamic-workflows/src/index.ts"
     ],
     "skills": [
       "./skills"

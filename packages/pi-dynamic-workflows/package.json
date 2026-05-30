@@ -1,0 +1,32 @@
+{
+  "name": "@andrii-k6a/pi-dynamic-workflows",
+  "version": "0.1.0",
+  "description": "Pi extension for Claude-Code-style dynamic workflow orchestration.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "workflow",
+    "agents"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "acorn": "^8.16.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.75.0",
+    "@earendil-works/pi-coding-agent": ">=0.75.0",
+    "@earendil-works/pi-tui": ">=0.75.0",
+    "typebox": "*"
+  }
+}
