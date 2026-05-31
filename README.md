@@ -16,6 +16,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-ralph](./packages/pi-ralph/) | Extension | Ralph Loop |
 | [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current Pi session into a new tmux pane (`/tmux-branch-*`) |
 | [@andrii-k6a/pi-telegram](./packages/pi-telegram/) | Extension | Telegram DM bridge — forward messages to/from pi via a Telegram bot |
+| [@andrii-k6a/pi-graphify](./packages/pi-graphify/) | Extension | Native Pi commands and tools for Graphify knowledge graphs (`/graphify`, `graphify_query`) |
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
 | [visual-explainer](./skills/visual-explainer/) | Skill | Generate visual HTML explanations |

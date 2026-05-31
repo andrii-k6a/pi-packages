@@ -1,0 +1,29 @@
+{
+  "name": "@andrii-k6a/pi-graphify",
+  "version": "0.1.0",
+  "description": "Pi extension that wraps the Graphify knowledge-graph CLI with native commands and tools.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "graphify",
+    "knowledge-graph",
+    "graphrag"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "IMPLEMENTATION_PLAN.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.75.0",
+    "typebox": ">=1.1.0"
+  }
+}
