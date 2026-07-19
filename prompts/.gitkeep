@@ -1,0 +1,3 @@
+# Prompt templates
+
+Add prompt template `.md` files here. They are auto-registered via the `pi.prompts` entry in the root `package.json`.
