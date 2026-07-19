@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Block until a spawned sub-agent finishes, then notify — instead of manually
+# re-running `cat exit_status`. Run this ONCE in a spare pane and walk away.
+#
+#   watch-subagent <workdir> [--result]
+#
+# It polls the completion sentinel (exit_status), shows a heartbeat so it's
+# clearly alive, and on completion emits a terminal bell (tmux monitor-bell can
+# surface this in the status bar) plus a macOS notification if osascript exists.
+# With --result it also prints the deliverable in-pane, so you never have to
+# route progress through the parent conversation.
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: watch-subagent <workdir> [--result]" >&2
+  exit 2
+fi
+
+dir="$1"
+show_result=0
+[[ "${2:-}" == "--result" ]] && show_result=1
+slug="$(basename "$dir")"
+
+if [[ ! -d "$dir" ]]; then
+  echo "watch-subagent: workdir not found: $dir" >&2
+  exit 1
+fi
+
+start=$(date +%s)
+
+# Poll for the sentinel. A heartbeat is only drawn to an interactive terminal so
+# piping/redirecting stays clean.
+while [[ ! -f "$dir/exit_status" ]]; do
+  if [[ -t 1 ]]; then
+    printf '\r\033[K\xe2\x8f\xb3 %s running... %ds' "$slug" "$(( $(date +%s) - start ))"
+  fi
+  sleep 2
+done
+
+status="$(cat "$dir/exit_status")"
+elapsed=$(( $(date +%s) - start ))
+[[ -t 1 ]] && printf '\r\033[K'
+
+printf '\a'   # terminal bell; tmux monitor-bell can flag the window when done
+if command -v osascript >/dev/null 2>&1; then
+  osascript -e "display notification \"$slug finished (exit $status) in ${elapsed}s\" with title \"pi subagent\"" >/dev/null 2>&1 || true
+fi
+
+if [[ "$status" == "0" ]]; then
+  echo "OK  $slug finished in ${elapsed}s (exit 0)"
+else
+  echo "ERR $slug failed in ${elapsed}s (exit $status)"
+fi
+
+if [[ "$show_result" == "1" ]]; then
+  echo "----"
+  cat "$dir/result.md" 2>/dev/null || tail -n 60 "$dir/transcript.log"
+fi

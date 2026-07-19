@@ -1,6 +1,6 @@
 ---
 name: pi-simple-subagent
-description: Delegate a self-contained task to an isolated background Pi sub-agent running fully detached, then pull back only its final result. Use when the user wants to offload work without polluting the current conversation's context. The sub-agent runs invisibly in the background; the parent checks status and pulls the result on demand. This is a minimal, dependency-free approach (a detached headless `pi -p` process); for richer multi-agent orchestration prefer Pi's built-in workflow/agent tooling.
+description: Delegate a self-contained task to an isolated, detached Pi sub-agent with a fresh context, then pull back only its final deliverable. Use to offload long or bulky work without polluting the current conversation; progress can be tracked hands-off out-of-band and the result pulled on demand. Minimal and dependency-free (a headless `pi -p` process); for richer multi-agent orchestration prefer otherPi's workflow/agent tooling if available.
 ---
 
 # pi-simple-subagent
@@ -54,9 +54,23 @@ The sub-agent has a fresh context, so the current conversation stays clean.
    > most tasks are unaffected. If the task needs project-local pi resources,
    > trust the project once interactively first.
 
-4. Tell the user it's delegated and how to check status. Do not poll aggressively.
+4. Tell the user it's delegated and how to track it. Point them at the
+   `watch-subagent` helper for hands-off tracking; do not poll aggressively
+   yourself, and keep progress-tracking out of this conversation.
 
-## Is it done? (cheap check)
+## Is it done?
+
+Hands-off (recommended): run the watcher **once** in a spare pane and walk away.
+It blocks until completion, then rings the terminal bell (tmux `monitor-bell`
+can flag the window) and fires a macOS notification if `osascript` exists — so
+nothing about progress tracking touches this conversation:
+
+```bash
+<skill-dir>/watch-subagent "$dir"            # notify on completion
+<skill-dir>/watch-subagent "$dir" --result   # also dump the deliverable in-pane
+```
+
+Cheap one-shot check (no waiting):
 
 ```bash
 cat "$dir/exit_status"    # absent = still running, 0 = success, non-zero = failed

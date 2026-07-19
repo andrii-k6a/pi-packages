@@ -9,6 +9,7 @@ fi
 dir="$1"
 task="$2"
 slug="$(basename "$dir")"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
 
 # Ensure the workdir exists so the exit_status/transcript sentinels are always
 # writable; a missing dir would silently drop exit_status and be misread as
@@ -32,6 +33,7 @@ NO_COLOR=1 nohup bash -c \
 disown
 
 echo "delegated: $slug (running detached in the background)"
+echo "watch:   $script_dir/watch-subagent '$dir'   (blocks in a spare pane, pings when done)"
 echo "status:  cat '$dir/exit_status'   (absent=running, 0=ok, non-zero=failed)"
 echo "result:  cat '$dir/result.md'"
 echo "resume:  pi --resume   (from this project; the session is named '$slug')"
