@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: spawn-subagent <workdir> <task-file>" >&2
+  exit 2
+fi
+
+dir="$1"
+task="$2"
+slug="$(basename "$dir")"
+
+# Ensure the workdir exists so the exit_status/transcript sentinels are always
+# writable; a missing dir would silently drop exit_status and be misread as
+# "still running" forever by the status check.
+mkdir -p "$dir"
+
+if [[ ! -f "$task" ]]; then
+  echo "spawn-subagent: task file not found: $task" >&2
+  exit 1
+fi
+
+# Run Pi headless, fully detached in the background — no terminal, nothing to watch.
+# `nohup` keeps it alive after the launching shell exits. Output is redirected to
+# transcript.log (a diagnostic fallback only), and Pi's own exit code is written to
+# exit_status as a completion sentinel the caller can poll cheaply. `-n "$slug"` names
+# the saved session so it can be resumed later with `pi --resume` if you ever need to
+# dig in. Runs in the current $PWD, i.e. the same project the parent is in.
+NO_COLOR=1 nohup bash -c \
+  "pi -n '$slug' -p @'$task' >'$dir/transcript.log' 2>&1; printf '%s\n' \$? >'$dir/exit_status'" \
+  >/dev/null 2>&1 &
+disown
+
+echo "delegated: $slug (running detached in the background)"
+echo "status:  cat '$dir/exit_status'   (absent=running, 0=ok, non-zero=failed)"
+echo "result:  cat '$dir/result.md'"
+echo "resume:  pi --resume   (from this project; the session is named '$slug')"
