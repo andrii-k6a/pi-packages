@@ -18,6 +18,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-dynamic-workflows](./packages/pi-dynamic-workflows/) | Extension | Claude-Code-style dynamic workflows — fan work out across isolated subagents via a `workflow` tool |
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
+| [i-have-adhd](./skills/i-have-adhd/) | Skill | Action-first, ADHD-friendly output shaping |
 | [pi-simple-subagent](./skills/pi-simple-subagent/) | Skill | Delegate a task to a detached background Pi sub-agent, then pull back only its final result |
 | [web-discovery](./skills/web-discovery/) | Skill | Browserless web search via local SearXNG + Defuddle |
 | [tokyonight](./themes/tokyonight.json) | Theme | Tokyo Night color theme |
