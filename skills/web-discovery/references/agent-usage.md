@@ -134,6 +134,16 @@ If Defuddle is missing, search still works and `scripts/fetch-url --metadata` / 
 
 Prefer extracted fetch for readable articles, blog posts, news pages, documentation pages, and guides.
 
+Exit-zero extraction is not proof of sufficiency. After an extracted fetch of a readable page, sanity-check that the expected article body and any requested media are actually present.
+
+First check for the explicit `[truncated to N characters]` marker emitted by `scripts/fetch-url`. Truncation means the unseen tail may contain the missing content or media references; it is not yet evidence that extraction failed. Retry extracted mode once with a larger bounded limit, then reassess:
+
+```bash
+scripts/fetch-url --max-chars 80000 "$selected_url"
+```
+
+Do not loop or keep increasing the limit. If the one retry remains truncated and task-required content or media still cannot be verified, treat the result as insufficient and record the truncation limitation. If a non-truncated result is wrapper-only, headline-only/thin, dominated by navigation/replies/cards, or missing requested media, likewise treat the extraction as insufficient even though the command succeeded.
+
 Prefer `--metadata` for extraction-hostile readable pages when concise metadata is enough to verify source identity, title, description, canonical URL, or dates. Claims based on metadata only must be labeled as metadata-limited.
 
 Prefer `--raw` for machine-readable or source-like content, for example: JSON APIs, package metadata, XML/RSS/Atom feeds, sitemaps, CSV/TSV, plain text, Markdown, source/config files, OpenAPI specs, and raw-content URLs. Also use it when the user asks for diagnostics/source inspection such as headers/body/source, redirects, metadata, JS-rendered links, page structure, or HTML markup itself.
@@ -155,22 +165,24 @@ Defuddle is for reading pages, not ranking the web. A page that extracts cleanly
 
 Blocked pages are common. If source returns 401/403, use metadata/snippets, search for alternate coverage, or cite the limitation.
 
-If extracted fetching fails:
+If extracted fetching fails **or a result remains insufficient after the truncation check** (wrapper-only, headline-only/thin, reply/card-dominated, missing requested media, or still-truncated required content):
 
-1. Do not retry the same URL with the same mode.
-2. Use `--metadata` if title/date/description/canonical metadata is enough.
-3. If the raw response itself is useful — machine-readable/source-like content, raw-content URLs, diagnostics/source inspection, or HTML source when the markup itself is needed — try `--raw` once.
-4. Otherwise, search for another source or syndicated/secondary coverage.
-5. If no better source exists, use the SearXNG snippet and clearly say the claim is snippet-only.
+1. If an explicit truncation marker was present, perform the single larger-`--max-chars` extracted retry above. If that result is sufficient, stop here; otherwise continue without another extracted retry.
+2. Otherwise, do not retry the same URL with the same mode.
+3. If the task needs the full source content or source media **and** browser automation is available, enter the rendered-page fallback. Load `agent-browser skills get core` and follow `rendered-page-fallback.md`. Its one-time metadata request is an identity/URL probe *inside* escalation, used to choose the best-known public page before browser navigation; it is not a fallback to metadata-only evidence. Do not bypass authentication or anti-bot controls.
+4. For identity-only needs, unavailable/blocked browser automation, or failed rendered escalation, use the existing identity-probe result when available; otherwise run `--metadata` once if title/date/description/canonical metadata is enough.
+5. If the raw response itself is useful — machine-readable/source-like content, raw-content URLs, diagnostics/source inspection, or HTML source when the markup itself is needed — try `--raw` once. Do not use raw HTML as a substitute for readable content.
+6. Otherwise, search for another source or syndicated/secondary coverage. A mirror may corroborate but must not silently replace a differing canonical source.
+7. If no better source exists, use the SearXNG snippet and clearly say the claim is snippet-only.
 
 If raw fetching fails, do not fall back to another raw attempt on the same URL. Search for another source, use available snippets with clear caveats, or cite the limitation.
 
 ### 6. Present results
 
-- Classify material claims as `fetched`, `metadata`, `snippet`, or `unverified` while working.
+- Classify material claims as `fetched`, `rendered`, `metadata`, `snippet`, or `unverified` while working.
 - Cite URLs for web-derived claims.
 - Prefer a small curated set of high-signal results.
-- Distinguish fetched-page evidence from metadata-only or snippet-only evidence.
+- Distinguish browserless `fetched`-page evidence, `rendered` browser-page evidence, metadata-only evidence, and snippet-only evidence. See `rendered-page-fallback.md` for the rendered evidence/provenance rules.
 - Note blocked pages when relevant.
 - Avoid presenting inaccessible page details as if fully verified.
 - Mention uncertainty if snippets are weak, pages could not be fetched, or engines were unresponsive.

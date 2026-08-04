@@ -4,6 +4,8 @@ A local, browserless web discovery skill powered by SearXNG search and Defuddle/
 
 It runs SearXNG in podman/docker for discovery, then can use Defuddle to fetch and read result pages. Raw fetching remains available through curl. This gives agents a repeatable way to search the web, docs, package registries, repositories, code, and papers.
 
+The skill is browserless-first. As an optional last resort, it documents a rendered-page fallback for readable pages whose browserless extraction fails or succeeds but is incomplete, wrapper-only, reply-polluted, or missing requested media (typically JS-rendered pages). That fallback uses browser automation and is only needed when full source content or media is required; see `references/rendered-page-fallback.md`.
+
 ## Quick start
 
 Run commands from this skill directory, or resolve the script paths relative to it when an agent invokes the skill.
@@ -36,6 +38,7 @@ podman stop searxng  # or: docker stop searxng
 - `scripts/searx` — bash helper around the SearXNG JSON API.
 - `scripts/fetch-url` — fetches a URL and prints extracted readable content, concise metadata, or raw response bodies.
 - `references/agent-usage.md` — detailed workflows for agents.
+- `references/rendered-page-fallback.md` — optional rendered-page fallback for failed or incomplete JS-rendered readable-page extraction.
 - `references/category-guide.md` — categories and engine selection.
 - `references/package-engine-status.md` — package search engine notes.
 - `references/pypi-direct-search.md` — PyPI workarounds.
@@ -47,6 +50,7 @@ podman stop searxng  # or: docker stop searxng
 - `defuddle` on `$PATH` for extracted page fetching
 - `jq` optional, for formatted parsing/output
 - `python3` required for `scripts/fetch-url --metadata`; optional for formatting Defuddle output (`--raw` works without it)
+- `agent-browser` (or equivalent browser automation) optional — required only for the rendered-page fallback, not for core browserless discovery/fetching
 
 No SearXNG installation is required; it runs in a container.
 

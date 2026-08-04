@@ -64,20 +64,53 @@ Use search for discovery and fetching for verification/detail. Do not let fetcha
   scripts/fetch-url --raw "https://raw.githubusercontent.com/user/repo/main/README.md"
   ```
 
-Do **not** use `--raw` for ordinary article/docs HTML merely because Defuddle is missing or extraction failed. If extracted fetch fails for a readable page, do not repeatedly retry the same URL; use `--metadata` if metadata is enough, search for alternate sources, or label snippet-limited claims.
+Do **not** use `--raw` for ordinary article/docs HTML merely because Defuddle is missing or extraction failed. If extracted fetch fails for a readable page, do not repeatedly retry the same URL. When the task requires full content or media, follow the optional rendered-page escalation below; otherwise use `--metadata` if metadata is enough, search for alternate sources, or label snippet-limited claims.
 
 For PDFs and binary/document downloads, do not dump binary with `--raw`; use snippets/metadata, a dedicated document/PDF tool if available, or cite the limitation.
+
+## Optional rendered-page escalation
+
+Browserless fetch is the default; escalating to a rendered browser page is a
+last resort, not a routine step. Escalation applies when extracted fetching
+fails, or nominally succeeds but is insufficient. A zero exit code is not proof
+of sufficiency.
+
+Before judging a successful fetch insufficient, check for the helper's explicit
+`[truncated to ... characters]` marker. If present, retry extracted mode once
+with a larger bounded `--max-chars`, then reassess; this marker-driven retry is
+the exception to the no-repeat rule. If that one retry remains truncated and
+required content cannot be verified, treat it as insufficient without retrying
+again and record the limitation.
+
+For other successful fetches, detect insufficiency using qualitative
+signals judged against task intent (no universal word-count threshold): the
+expected article body is absent, output is headline-only/thin, navigation /
+replies / cards dominate, or requested media are missing.
+
+Escalate only when the task requires the full source content or source media
+**and** browser automation is available. Before any browser command, load the
+current agent-browser core instructions (`agent-browser skills get core`), open
+the best-known public page (canonical when known, otherwise requested) in an
+isolated session, and follow
+`references/rendered-page-fallback.md`. Do not bypass authentication, paywalls,
+or anti-bot controls.
+
+If the task needs only source identity (title/author/date/canonical/snippet),
+do not escalate. If browser automation is unavailable or blocked, fall back to
+metadata / alternate sources / snippets and state the limitation explicitly;
+do not use raw HTML as a substitute for readable content.
 
 ## Result handling
 
 During discovery, classify candidate evidence in notes or mentally:
 
-- `fetched`: verified from fetched/extracted page content.
+- `fetched`: verified from browserless fetched/extracted page content.
+- `rendered`: verified from a rendered browser page after escalation (see `references/rendered-page-fallback.md`), distinct from browserless `fetched`.
 - `metadata`: based on page metadata only.
 - `snippet`: based only on search result snippet.
 - `unverified`: candidate seen but not used for a claim.
 
-Final answers should cite sources for web-derived claims, distinguish fetched claims from snippet/metadata-only claims when material, and avoid presenting snippet-only claims with the same confidence as fetched content. Mention unresponsive engines, blocked pages, failed fetches, or weak snippets when relevant. If SearXNG returns empty results, retry once with broader terms or a better category before giving up.
+Final answers should cite sources for web-derived claims; distinguish browserless `fetched`, browser `rendered`, `metadata`, and `snippet` evidence when material; and avoid presenting snippet-only claims with the same confidence as fetched or rendered content. Mention unresponsive engines, blocked pages, failed fetches, or weak snippets when relevant. If SearXNG returns empty results, retry once with broader terms or a better category before giving up.
 
 ## Category quick guide
 
@@ -122,6 +155,7 @@ Default SearXNG URL is `http://localhost:8888`; override with `SEARXNG_URL` or `
 ## References
 
 - `references/agent-usage.md`: detailed agent workflows, fallback rules, and repository exploration.
+- `references/rendered-page-fallback.md`: optional rendered-page escalation for readable pages whose browserless extraction fails or is incomplete, wrapper-only, reply-polluted, or missing requested media.
 - `references/category-guide.md`: category and engine guide.
 - `references/package-engine-status.md`: package engine test notes.
 - `references/pypi-direct-search.md`: PyPI workarounds.
