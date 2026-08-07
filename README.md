@@ -8,14 +8,11 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 
 | Package | Type | Description |
 |---------|------|-------------|
-| [@andrii-k6a/pi-draw](./packages/pi-draw/) | Extension | Open a tldraw canvas and attach drawings to the prompt (`/draw`, `Ctrl+Shift+C`) |
 | [@andrii-k6a/pi-generative-ui](./packages/pi-generative-ui/) | Extension | Render generated HTML/SVG widgets in native windows (`visualize_read_me`, `show_widget`) |
-| [@andrii-k6a/pi-btw](./packages/pi-btw/) | Extension | Side-question command `/btw` |
 | [@andrii-k6a/pi-feedback](./packages/pi-feedback/) | Extension | Review assistant replies in your editor and submit as feedback (`/feedback`) |
 | [@andrii-k6a/pi-inspect](./packages/pi-inspect/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`, `--dump-tools`) |
 | [@andrii-k6a/pi-head](./packages/pi-head/) | Extension | Keyboard-scrollable viewer for the latest response (`/head`) |
 | [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current Pi session into a new tmux pane (`/tmux-branch-*`) |
-| [@andrii-k6a/pi-telegram](./packages/pi-telegram/) | Extension | Telegram DM bridge — forward messages to/from pi via a Telegram bot |
 | [@andrii-k6a/pi-dynamic-workflows](./packages/pi-dynamic-workflows/) | Extension | Claude-Code-style dynamic workflows — fan work out across isolated subagents via a `workflow` tool |
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |

@@ -23,14 +23,11 @@
   ],
   "pi": {
     "extensions": [
-      "./packages/pi-btw/src/btw.ts",
       "./packages/pi-feedback/src/feedback.ts",
       "./packages/pi-head/src/head.ts",
       "./packages/pi-inspect/src/inspect.ts",
-      "./packages/pi-draw/src/draw.ts",
       "./packages/pi-generative-ui/src/index.ts",
       "./packages/pi-tmux-branch/src/tmux-branch.ts",
-      "./packages/pi-telegram/src/telegram.ts",
       "./packages/pi-dynamic-workflows/src/index.ts"
     ],
     "skills": [
