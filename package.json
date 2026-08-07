@@ -28,6 +28,7 @@
       "./packages/pi-head/src/head.ts",
       "./packages/pi-inspect/src/inspect.ts",
       "./packages/pi-draw/src/draw.ts",
+      "./packages/pi-generative-ui/src/index.ts",
       "./packages/pi-tmux-branch/src/tmux-branch.ts",
       "./packages/pi-telegram/src/telegram.ts",
       "./packages/pi-dynamic-workflows/src/index.ts"
@@ -49,6 +50,7 @@
     "@earendil-works/pi-coding-agent": "^0.75.3",
     "@earendil-works/pi-tui": "^0.75.3",
     "@types/node": "^22.0.0",
+    "esbuild": "^0.28.1",
     "typebox": "^1.1.24",
     "typescript": "^5.5.0",
     "vitest": "^4.0.18"

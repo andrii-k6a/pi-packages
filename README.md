@@ -9,6 +9,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | Package | Type | Description |
 |---------|------|-------------|
 | [@andrii-k6a/pi-draw](./packages/pi-draw/) | Extension | Open a tldraw canvas and attach drawings to the prompt (`/draw`, `Ctrl+Shift+C`) |
+| [@andrii-k6a/pi-generative-ui](./packages/pi-generative-ui/) | Extension | Render generated HTML/SVG widgets in native windows (`visualize_read_me`, `show_widget`) |
 | [@andrii-k6a/pi-btw](./packages/pi-btw/) | Extension | Side-question command `/btw` |
 | [@andrii-k6a/pi-feedback](./packages/pi-feedback/) | Extension | Review assistant replies in your editor and submit as feedback (`/feedback`) |
 | [@andrii-k6a/pi-inspect](./packages/pi-inspect/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`, `--dump-tools`) |

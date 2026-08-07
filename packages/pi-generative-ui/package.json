@@ -1,0 +1,38 @@
+{
+  "name": "@andrii-k6a/pi-generative-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A pi extension that renders generated HTML/SVG widgets in native windows.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "generative-ui",
+    "widgets",
+    "visualization"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:runtime": "node src/build.mjs"
+  },
+  "dependencies": {
+    "glimpseui": "^0.8.1",
+    "morphdom": "^2.7.8"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.75.0",
+    "@earendil-works/pi-coding-agent": ">=0.75.0",
+    "@earendil-works/pi-tui": ">=0.75.0",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
