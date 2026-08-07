@@ -12,9 +12,15 @@
   ],
   "files": [
     "src",
+    "types",
     "README.md",
     "LICENSE"
   ],
+  "exports": {
+    "./workflow": {
+      "types": "./types/workflow.d.ts"
+    }
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"

@@ -62,13 +62,12 @@ export class WorkflowAgent {
       );
     }
 
+    const agentDir = getAgentDir();
     const { session } = await createAgentSession({
       cwd: this.cwd,
-      agentDir: getAgentDir(),
-      sessionManager: SessionManager.inMemory(),
-      settingsManager: SettingsManager.inMemory({
-        compaction: { enabled: false }
-      }),
+      agentDir,
+      sessionManager: SessionManager.inMemory(this.cwd),
+      settingsManager: SettingsManager.create(this.cwd, agentDir),
       customTools,
       ...this.sessionOptions
     });
