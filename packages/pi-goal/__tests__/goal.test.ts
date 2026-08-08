@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CONFIG_DIR_NAME } from '@earendil-works/pi-coding-agent';
 import { describe, test } from 'vitest';
 import { GOAL_CONTINUATION_MESSAGE } from '../src/continuation.js';
 import { type GoalExtensionOptions, registerGoalExtension } from '../src/goal.js';
@@ -37,7 +41,76 @@ describe('pi-goal extension integration', () => {
     const state = latestState(harness.appended);
     assert.equal(state?.status, 'active');
     assert.equal(state?.objective, 'Ship it');
+    assert.equal(state?.tokenBudget, 10_000_000);
     assert.equal(harness.sent.length, 1);
+  });
+
+  test('/goal --tokens overrides configured defaults', async () => {
+    const clock = new MutableClock();
+    const harness = createHarness({
+      ids: ids('goal', 'dispatch'),
+      clock,
+      defaultTokenBudget: '1M'
+    });
+    registerGoalExtension(harness.pi as never, harness.options);
+
+    await harness.commands.goal(
+      '--tokens 50k Ship it',
+      fakeCtx({ branch: [{ id: 'leaf' }], hasUI: false })
+    );
+
+    const state = latestState(harness.appended);
+    assert.equal(state?.objective, 'Ship it');
+    assert.equal(state?.tokenBudget, 50_000);
+  });
+
+  test('/goal uses option, environment, and project config token defaults', async () => {
+    const originalEnv = process.env.PI_GOAL_TOKEN_BUDGET;
+    try {
+      const optionClock = new MutableClock();
+      const optionHarness = createHarness({
+        ids: ids('option-goal', 'option-dispatch'),
+        clock: optionClock,
+        defaultTokenBudget: '1M'
+      });
+      registerGoalExtension(optionHarness.pi as never, optionHarness.options);
+      await optionHarness.commands.goal(
+        'Option default',
+        fakeCtx({ branch: [{ id: 'leaf' }], hasUI: false })
+      );
+      assert.equal(latestState(optionHarness.appended)?.tokenBudget, 1_000_000);
+
+      process.env.PI_GOAL_TOKEN_BUDGET = '100k';
+      const envClock = new MutableClock();
+      const envHarness = createHarness({ ids: ids('env-goal', 'env-dispatch'), clock: envClock });
+      registerGoalExtension(envHarness.pi as never, envHarness.options);
+      await envHarness.commands.goal(
+        'Env default',
+        fakeCtx({ branch: [{ id: 'leaf' }], hasUI: false })
+      );
+      assert.equal(latestState(envHarness.appended)?.tokenBudget, 100_000);
+
+      delete process.env.PI_GOAL_TOKEN_BUDGET;
+      const cwd = makeProjectConfig({ defaultTokenBudget: '10M' });
+      try {
+        const configClock = new MutableClock();
+        const configHarness = createHarness({
+          ids: ids('config-goal', 'config-dispatch'),
+          clock: configClock
+        });
+        registerGoalExtension(configHarness.pi as never, configHarness.options);
+        await configHarness.commands.goal(
+          'Config default',
+          fakeCtx({ branch: [{ id: 'leaf' }], hasUI: false, cwd })
+        );
+        assert.equal(latestState(configHarness.appended)?.tokenBudget, 10_000_000);
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    } finally {
+      if (originalEnv === undefined) delete process.env.PI_GOAL_TOKEN_BUDGET;
+      else process.env.PI_GOAL_TOKEN_BUDGET = originalEnv;
+    }
   });
 
   test('agent_settled keeps sent continuation queued until matching agent_start', async () => {
@@ -80,6 +153,35 @@ describe('pi-goal extension integration', () => {
     await harness.commands.goal('Second', ctx);
 
     assert.equal(latestState(harness.appended)?.objective, 'First');
+  });
+
+  test('/goal confirms replacement before resolving invalid default budget', async () => {
+    const originalEnv = process.env.PI_GOAL_TOKEN_BUDGET;
+    try {
+      process.env.PI_GOAL_TOKEN_BUDGET = 'invalid';
+      const clock = new MutableClock();
+      const harness = createHarness({ ids: ids('goal', 'dispatch'), clock });
+      registerGoalExtension(harness.pi as never, harness.options);
+      let confirmCalls = 0;
+      const ctx = fakeCtx({
+        branch: [{ id: 'leaf' }],
+        hasUI: true,
+        confirm: async () => {
+          confirmCalls += 1;
+          return false;
+        }
+      });
+
+      await harness.commands.goal('--tokens 50k First', ctx);
+      await harness.commands.goal('Second', ctx);
+
+      assert.equal(confirmCalls, 1);
+      assert.equal(latestState(harness.appended)?.objective, 'First');
+      assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? '', /Invalid PI_GOAL_TOKEN_BUDGET/);
+    } finally {
+      if (originalEnv === undefined) delete process.env.PI_GOAL_TOKEN_BUDGET;
+      else process.env.PI_GOAL_TOKEN_BUDGET = originalEnv;
+    }
   });
 
   test('/goal rejects oversized replacement before UI confirmation', async () => {
@@ -273,6 +375,36 @@ describe('pi-goal extension integration', () => {
       state?.tokensUsed,
       estimateTokensFromModelPayload(payload) + estimateTokensFromText(output)
     );
+  });
+
+  test('token budget exhaustion aborts the active executor run', async () => {
+    const clock = new MutableClock();
+    const harness = createHarness({
+      ids: ids('goal', 'dispatch'),
+      clock,
+      defaultTokenBudget: 100_000
+    });
+    registerGoalExtension(harness.pi as never, harness.options);
+    const ctx = fakeCtx({ branch: [{ id: 'leaf' }], hasUI: true });
+
+    await harness.commands.goal('Stop on budget', ctx);
+    harness.emit('agent_start', {}, ctx);
+    harness.emit(
+      'message_end',
+      {
+        message: {
+          role: 'assistant',
+          usage: { totalTokens: 100_001 },
+          content: []
+        }
+      },
+      ctx
+    );
+
+    const latest = latestState(harness.appended);
+    assert.equal(latest?.status, 'budget_limited');
+    assert.equal(latest?.budgetReason, 'tokens');
+    assert.equal(ctx.abortCalls, 1);
   });
 
   test('valid claim launches verifier after settlement and pass completes', async () => {
@@ -498,7 +630,8 @@ describe('pi-goal extension integration', () => {
     const harness = createHarness({
       ids: ids('goal', 'dispatch', 'claim', 'attempt'),
       clock,
-      runVerifier: async () => verifierFail(clock, 20)
+      runVerifier: async () => verifierFail(clock, 20),
+      defaultTokenBudget: 100_000
     });
     registerGoalExtension(harness.pi as never, harness.options);
     const ctx = fakeCtx({ branch: [{ id: 'leaf' }], hasUI: true });
@@ -627,18 +760,28 @@ function fakeCtx(input: {
   branch: Array<Record<string, unknown>>;
   hasUI: boolean;
   confirm?: () => Promise<boolean>;
+  cwd?: string;
+  projectTrusted?: boolean;
 }) {
   const notifications: Array<{ message: string; type?: string }> = [];
+  let abortCalls = 0;
   return {
-    cwd: '/repo',
+    cwd: input.cwd ?? '/repo',
     mode: input.hasUI ? 'tui' : 'json',
     hasUI: input.hasUI,
     notifications,
+    get abortCalls() {
+      return abortCalls;
+    },
     model: { provider: 'p', id: 'm' },
     thinkingLevel: 'low',
     sessionManager: { getBranch: () => input.branch },
     isIdle: () => true,
     hasPendingMessages: () => false,
+    isProjectTrusted: () => input.projectTrusted ?? true,
+    abort() {
+      abortCalls += 1;
+    },
     ui: {
       notify(message: string, type?: string) {
         notifications.push({ message, type });
@@ -647,6 +790,18 @@ function fakeCtx(input: {
       confirm: input.confirm ?? (async () => true)
     }
   };
+}
+
+function makeProjectConfig(config: Record<string, unknown>): string {
+  const cwd = mkdtempForGoalTest();
+  const configDir = join(cwd, CONFIG_DIR_NAME);
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, 'pi-goal.json'), JSON.stringify(config), 'utf8');
+  return cwd;
+}
+
+function mkdtempForGoalTest(): string {
+  return mkdtempSync(join(tmpdir(), 'pi-goal-'));
 }
 
 function latestState(

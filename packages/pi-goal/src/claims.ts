@@ -72,13 +72,8 @@ export function assertCurrentGoalInput(
   state: GoalState | undefined,
   input: { goal_id?: unknown; generation?: unknown }
 ): asserts state is GoalState {
-  if (!state) throw new Error('No current goal.');
-  if (state.status !== 'active') {
-    throw new Error(`Goal is ${state.status}; terminal goal tools require an active goal.`);
-  }
-  if (input.goal_id !== state.id || input.generation !== state.generation) {
-    throw new Error('Stale goal id or generation.');
-  }
+  const error = describeGoalIdentityError(state, input);
+  if (error) throw new Error(error);
 }
 
 export function isCurrentTerminalInput(
@@ -86,32 +81,109 @@ export function isCurrentTerminalInput(
   toolName: string,
   input: Record<string, unknown>
 ): boolean {
-  if (!state || state.status !== 'active') return false;
-  if (input.goal_id !== state.id || input.generation !== state.generation) return false;
+  return describeTerminalGoalInputError(state, toolName, input) === undefined;
+}
+
+export function describeTerminalGoalInputError(
+  state: GoalState | undefined,
+  toolName: string,
+  input: Record<string, unknown>
+): string | undefined {
+  const identityError = describeGoalIdentityError(state, input);
+  if (identityError) return identityError;
+
   if (toolName === 'pi_goal_claim_done') {
-    return (
+    const missing: string[] = [];
+    if (
       sanitizeText(input.summary, {
         maxLength: TEXT_LIMITS.summary,
         allowNewlines: true,
         collapseWhitespace: true
-      }).length > 0 &&
+      }).length === 0
+    ) {
+      missing.push('summary');
+    }
+    if (
       sanitizeText(input.evidence, {
         maxLength: TEXT_LIMITS.evidence,
         allowNewlines: true,
         collapseWhitespace: false
-      }).length > 0
-    );
+      }).length === 0
+    ) {
+      missing.push('evidence');
+    }
+    if (missing.length > 0) {
+      return `Invalid pi_goal_claim_done input: ${missing.join(' and ')} ${
+        missing.length === 1 ? 'is' : 'are'
+      } required after sanitization. ${describeGoalInputContext(state, input)}`;
+    }
+    return undefined;
   }
+
   if (toolName === 'pi_goal_blocked') {
-    return (
+    if (
       sanitizeText(input.reason, {
         maxLength: TEXT_LIMITS.reason,
         allowNewlines: true,
         collapseWhitespace: true
-      }).length > 0
-    );
+      }).length === 0
+    ) {
+      return `Invalid pi_goal_blocked input: reason is required after sanitization. ${describeGoalInputContext(
+        state,
+        input
+      )}`;
+    }
+    return undefined;
   }
-  return false;
+
+  return `Unsupported terminal goal tool: ${formatDiagnosticValue(toolName)}. ${describeGoalInputContext(
+    state,
+    input
+  )}`;
+}
+
+function describeGoalIdentityError(
+  state: GoalState | undefined,
+  input: { goal_id?: unknown; generation?: unknown }
+): string | undefined {
+  if (!state) return `No current goal. ${describeGoalInputContext(state, input)}`;
+  if (state.status !== 'active') {
+    return `Current goal status is ${state.status}; terminal goal tools require active. ${describeGoalInputContext(
+      state,
+      input
+    )}`;
+  }
+  if (input.goal_id !== state.id || input.generation !== state.generation) {
+    return `Stale goal id or generation. ${describeGoalInputContext(state, input)}`;
+  }
+  return undefined;
+}
+
+function describeGoalInputContext(
+  state: GoalState | undefined,
+  input: { goal_id?: unknown; generation?: unknown }
+): string {
+  const provided = `provided goal_id=${formatDiagnosticValue(
+    input.goal_id
+  )}, generation=${formatDiagnosticValue(input.generation)}`;
+  if (!state) return `Current goal status=none; ${provided}.`;
+
+  return `Current goal status=${state.status}; expected goal_id=${formatDiagnosticValue(
+    state.id
+  )}, generation=${state.generation}; ${provided}.`;
+}
+
+function formatDiagnosticValue(value: unknown): string {
+  if (value === undefined) return '<missing>';
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'string') {
+    const chars = Array.from(value.replaceAll('\n', ' '));
+    const text = chars.length > 64 ? `${chars.slice(0, 64).join('')}…` : chars.join('');
+    return JSON.stringify(text);
+  }
+  if (Array.isArray(value)) return '<array>';
+  return `<${typeof value}>`;
 }
 
 export function parseVerificationReportText(text: string, createdAt: string): VerificationReport {

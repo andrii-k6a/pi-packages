@@ -9,7 +9,7 @@ import {
   BlockedParams,
   type ClaimDoneInput,
   ClaimDoneParams,
-  isCurrentTerminalInput,
+  describeTerminalGoalInputError,
   TERMINAL_GOAL_TOOL_NAMES
 } from './claims.js';
 import type { Clock, IdProvider } from './ids.js';
@@ -112,16 +112,25 @@ export interface TerminalBatchGuardInput {
 export function shouldBlockTerminalGoalBatch(
   input: TerminalBatchGuardInput
 ): ToolCallEventResult | undefined {
+  const eventTerminalError = TERMINAL_GOAL_TOOL_NAMES.has(input.eventToolName)
+    ? describeTerminalGoalInputError(input.state, input.eventToolName, input.eventInput)
+    : undefined;
+
   const batch = findAssistantToolBatch(input.branch, input.eventToolCallId);
-  if (!batch || batch.length === 0) return undefined;
+  if (!batch || batch.length === 0) {
+    return eventTerminalError ? blockStaleTerminal(eventTerminalError) : undefined;
+  }
 
   const terminalBlocks = batch.filter((block) => TERMINAL_GOAL_TOOL_NAMES.has(block.name));
-  if (terminalBlocks.length === 0) return undefined;
+  if (terminalBlocks.length === 0) {
+    return eventTerminalError ? blockStaleTerminal(eventTerminalError) : undefined;
+  }
 
-  const validTerminalBlocks = terminalBlocks.filter((block) =>
-    isCurrentTerminalInput(input.state, block.name, asRecord(block.arguments))
-  );
-  const allowedTerminalId = validTerminalBlocks[0]?.id;
+  const terminalChecks = terminalBlocks.map((block) => ({
+    block,
+    error: describeTerminalGoalInputError(input.state, block.name, asRecord(block.arguments))
+  }));
+  const allowedTerminalId = terminalChecks.find((check) => !check.error)?.block.id;
 
   if (!TERMINAL_GOAL_TOOL_NAMES.has(input.eventToolName)) {
     return {
@@ -133,11 +142,10 @@ export function shouldBlockTerminalGoalBatch(
   }
 
   if (!allowedTerminalId) {
-    return {
-      block: true,
-      terminate: true,
-      reason: 'Blocked stale or invalid terminal pi-goal tool call.'
-    };
+    const detail =
+      terminalChecks.find((check) => check.block.id === input.eventToolCallId)?.error ??
+      eventTerminalError;
+    return blockStaleTerminal(detail);
   }
 
   if (input.eventToolCallId !== allowedTerminalId) {
@@ -148,15 +156,19 @@ export function shouldBlockTerminalGoalBatch(
     };
   }
 
-  if (!isCurrentTerminalInput(input.state, input.eventToolName, input.eventInput)) {
-    return {
-      block: true,
-      terminate: true,
-      reason: 'Blocked stale or invalid terminal pi-goal tool call.'
-    };
-  }
+  if (eventTerminalError) return blockStaleTerminal(eventTerminalError);
 
   return undefined;
+}
+
+function blockStaleTerminal(detail: string | undefined): ToolCallEventResult {
+  return {
+    block: true,
+    terminate: true,
+    reason: detail
+      ? `Blocked stale or invalid terminal pi-goal tool call. ${detail}`
+      : 'Blocked stale or invalid terminal pi-goal tool call.'
+  };
 }
 
 export interface ToolCallBlock {

@@ -1,6 +1,12 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Usage } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import {
+  CONFIG_DIR_NAME,
+  type ExtensionAPI,
+  type ExtensionContext
+} from '@earendil-works/pi-coding-agent';
 import { formatGoalStatus, parseGoalCommand } from './commands.js';
 import {
   clearSettledDispatch,
@@ -45,6 +51,7 @@ import {
   resumeGoal,
   type VerificationReport
 } from './state.js';
+import { parseOptionalTokenBudget, TOKEN_BUDGET_ENV } from './token-budget.js';
 import { registerGoalTools } from './tools.js';
 import { notifyGoal, notifyGoalStatus, updateGoalUi } from './ui.js';
 import {
@@ -60,6 +67,7 @@ export interface GoalExtensionOptions {
   ids?: IdProvider;
   clock?: Clock;
   runVerifier?: (input: VerifierRunInput) => Promise<VerifierRunResult>;
+  defaultTokenBudget?: number | string;
 }
 
 type InterruptedVerificationReason = 'pause' | 'branch' | 'reload';
@@ -76,6 +84,10 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
   const ids = options.ids ?? systemIdProvider;
   const clock = options.clock ?? systemClock;
   const runVerifier = options.runVerifier ?? runVerifierSubprocess;
+  const optionDefaultTokenBudget = parseOptionalTokenBudget(
+    options.defaultTokenBudget,
+    'defaultTokenBudget option'
+  );
   const runtime: RuntimeState = {};
 
   const commitState = (
@@ -141,9 +153,9 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
   pi.registerCommand('goal', {
     description: 'Set, inspect, pause, resume, or clear one verifier-gated branch-local goal',
     handler: async (args, ctx) => {
-      const command = parseGoalCommand(args);
-
       try {
+        const command = parseGoalCommand(args);
+
         if (command.type === 'status') {
           notifyGoalStatus(ctx, runtime.goal, clock);
           appendCommandResult(pi, runtime.goal, formatGoalStatus(runtime.goal, clock));
@@ -151,7 +163,7 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
         }
 
         if (command.type === 'create') {
-          await handleCreate(command.objective, ctx);
+          await handleCreate(command.objective, ctx, command.tokenBudget);
           return;
         }
 
@@ -284,7 +296,44 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
     messages: filterStaleContinuationMessages(event.messages, runtime.goal)
   }));
 
-  async function handleCreate(objective: string, ctx: ExtensionContext): Promise<void> {
+  function resolveDefaultTokenBudget(ctx: ExtensionContext): number | undefined {
+    return (
+      optionDefaultTokenBudget ??
+      parseOptionalTokenBudget(process.env[TOKEN_BUDGET_ENV], TOKEN_BUDGET_ENV) ??
+      readProjectConfigTokenBudget(ctx)
+    );
+  }
+
+  function readProjectConfigTokenBudget(ctx: ExtensionContext): number | undefined {
+    if (!ctx.isProjectTrusted()) return undefined;
+
+    const configPath = join(ctx.cwd, CONFIG_DIR_NAME, 'pi-goal.json');
+    if (!existsSync(configPath)) return undefined;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid pi-goal config ${configPath}: ${message}`);
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`Invalid pi-goal config ${configPath}: expected a JSON object.`);
+    }
+
+    const record = parsed as Record<string, unknown>;
+    return parseOptionalTokenBudget(
+      record.defaultTokenBudget ?? record.tokenBudget,
+      `token budget in ${configPath}`
+    );
+  }
+
+  async function handleCreate(
+    objective: string,
+    ctx: ExtensionContext,
+    tokenBudget: number | undefined
+  ): Promise<void> {
     if (Array.from(objective).length > TEXT_LIMITS.objective) {
       notifyGoal(
         ctx,
@@ -322,12 +371,14 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
       }
     }
 
+    const resolvedTokenBudget = tokenBudget ?? resolveDefaultTokenBudget(ctx);
     invalidateRuntime();
     const next = createGoal({
       objective,
       branchAnchorId: getBranchLeafId(ctx.sessionManager.getBranch()),
       ids,
-      clock
+      clock,
+      tokenBudget: resolvedTokenBudget
     });
     commitState(next, ctx, current && !isClosedStatus(current.status) ? 'replace' : 'create');
     notifyGoal(ctx, `Goal started: ${next.objective}`, 'info');
@@ -423,6 +474,7 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
     if (budget) {
       invalidateRuntime();
       commitState(limitBudget(withUsage, clock, budget), ctx, `budget_${budget}`);
+      ctx.abort();
       notifyGoal(ctx, `Goal stopped: ${budget} budget exhausted.`, 'warning');
       return;
     }

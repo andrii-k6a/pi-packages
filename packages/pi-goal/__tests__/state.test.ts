@@ -36,9 +36,22 @@ describe('goal state reducer helpers', () => {
     assert.equal(state.id, 'goal-1');
     assert.equal(state.status, 'active');
     assert.equal(state.generation, 0);
-    assert.equal(state.tokenBudget, 100_000);
+    assert.equal(state.tokenBudget, 10_000_000);
     assert.equal(state.timeBudgetMs, 3_600_000);
     assert.deepEqual(state.doneCriteria, ['npm test passes']);
+  });
+
+  test('accepts token budget override for new goals', () => {
+    const clock = new MutableClock();
+    const state = createGoal({
+      objective: 'Fix tests',
+      branchAnchorId: 'leaf-1',
+      ids: ids('goal-1'),
+      clock,
+      tokenBudget: 50_000
+    });
+
+    assert.equal(state.tokenBudget, 50_000);
   });
 
   test('extracts markdown checklist criteria before Done when fallback', () => {

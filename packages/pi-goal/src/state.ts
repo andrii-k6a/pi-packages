@@ -1,7 +1,7 @@
 import type { Clock, IdProvider } from './ids.js';
 import { sanitizeStringArray, sanitizeText, TEXT_LIMITS } from './sanitize.js';
 
-export const DEFAULT_TOKEN_BUDGET = 100_000;
+export const DEFAULT_TOKEN_BUDGET = 10_000_000;
 export const DEFAULT_TIME_BUDGET_MS = 3_600_000;
 
 export const goalStatuses = [
@@ -113,6 +113,7 @@ export interface CreateGoalInput {
   branchAnchorId: string | null;
   ids: IdProvider;
   clock: Clock;
+  tokenBudget?: number;
 }
 
 export function isClosedStatus(status: GoalStatus): boolean {
@@ -148,7 +149,7 @@ export function createGoal(input: CreateGoalInput): GoalState {
     createdAt: now,
     updatedAt: now,
     tokensUsed: 0,
-    tokenBudget: DEFAULT_TOKEN_BUDGET,
+    tokenBudget: input.tokenBudget ?? DEFAULT_TOKEN_BUDGET,
     elapsedActiveMs: 0,
     timeBudgetMs: DEFAULT_TIME_BUDGET_MS,
     activeStartedAt: now

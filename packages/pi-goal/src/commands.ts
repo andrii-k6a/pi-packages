@@ -6,21 +6,62 @@ import {
   getEffectiveElapsedActiveMs,
   isClosedStatus
 } from './state.js';
+import { parseTokenBudget } from './token-budget.js';
 
 export type GoalCommand =
   | { type: 'status' }
   | { type: 'pause' }
   | { type: 'resume' }
   | { type: 'clear' }
-  | { type: 'create'; objective: string };
+  | { type: 'create'; objective: string; tokenBudget?: number };
 
 export function parseGoalCommand(args: string): GoalCommand {
-  const trimmed = args.trim();
+  let trimmed = args.trim();
+  let tokenBudget: number | undefined;
+
+  while (startsTokenOption(trimmed)) {
+    if (tokenBudget !== undefined) throw new Error('Duplicate --tokens option.');
+    const parsed = consumeTokenBudgetOption(trimmed);
+    tokenBudget = parsed.tokenBudget;
+    trimmed = parsed.remaining.trim();
+  }
+
+  if (tokenBudget !== undefined) {
+    if (!trimmed) throw new Error('Goal objective is required when using --tokens.');
+    return { type: 'create', objective: trimmed, tokenBudget };
+  }
+
   if (!trimmed || trimmed === 'status') return { type: 'status' };
   if (trimmed === 'pause') return { type: 'pause' };
   if (trimmed === 'resume') return { type: 'resume' };
   if (trimmed === 'clear') return { type: 'clear' };
   return { type: 'create', objective: trimmed };
+}
+
+function startsTokenOption(input: string): boolean {
+  return input === '--tokens' || input.startsWith('--tokens=') || /^--tokens\s/.test(input);
+}
+
+function consumeTokenBudgetOption(input: string): { tokenBudget: number; remaining: string } {
+  if (input.startsWith('--tokens=')) {
+    const { token, rest } = consumeLeadingToken(input);
+    return {
+      tokenBudget: parseTokenBudget(token.slice('--tokens='.length)),
+      remaining: rest
+    };
+  }
+
+  const afterOption = input.slice('--tokens'.length).trimStart();
+  if (!afterOption) throw new Error('Missing token budget after --tokens.');
+
+  const { token, rest } = consumeLeadingToken(afterOption);
+  return { tokenBudget: parseTokenBudget(token), remaining: rest };
+}
+
+function consumeLeadingToken(input: string): { token: string; rest: string } {
+  const match = input.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  if (!match?.[1]) return { token: '', rest: '' };
+  return { token: match[1], rest: match[2] ?? '' };
 }
 
 export function canReplaceWithoutConfirmation(state: GoalState | undefined): boolean {

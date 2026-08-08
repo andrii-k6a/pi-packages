@@ -117,7 +117,7 @@ Excluded decisions:
 - **Verification report**: the verifier subagent’s structured verdict for a single completion claim.
 - **Evidence**: bounded facts supporting a claim, such as commands run, files changed, check results, observed outputs, or explicit user confirmation.
 - **Continuation**: an extension-sent follow-up that asks the executor to make one more useful increment.
-- **Token budget**: the maximum observed goal-related model tokens before the extension stops. Default: 100,000 tokens.
+- **Token budget**: the maximum observed goal-related model tokens before the extension stops. Default: 10,000,000 tokens.
 - **Goal time budget**: the maximum observed active wall-clock time before the extension stops. Default: 1 hour.
 - **Closed state**: `complete` or `cleared`. A new `/goal <objective>` may replace a closed goal without confirmation.
 - **Stopped but not closed state**: `paused`, `blocked`, or `budget_limited`. These do not auto-continue, but `/goal <objective>` still asks confirmation before replacing them.
@@ -146,7 +146,7 @@ The implementation SHALL include:
 - one mandatory verifier subagent run for each current, non-canceled, valid completion claim when token/time budget remains;
 - one code-owned reducer that applies typed executor and verifier events;
 - branch-aware state persistence;
-- a token budget defaulting to 100,000 tokens;
+- a token budget defaulting to 10,000,000 tokens;
 - a goal active-time budget defaulting to 1 hour.
 
 The implementation SHALL NOT include:
@@ -180,6 +180,9 @@ Requirement notation:
 - **R1.6** THE EXTENSION SHALL reject objectives longer than 4000 characters rather than silently truncating user intent.
 - **R1.7** THE EXTENSION SHOULD preserve explicit user-provided done criteria when the objective contains a `Done when:` section or Markdown checklist. This extraction is best-effort and limited to obvious textual criteria.
 - **R1.8** New goals SHALL receive a new collision-resistant `goal_id`, `generation = 0`, `tokensUsed = 0`, and `elapsedActiveMs = 0`.
+- **R1.9** `/goal --tokens <budget> <objective>` and `/goal --tokens=<budget> <objective>` SHALL create a goal with the requested per-goal token budget.
+- **R1.10** Token budget values SHALL be positive whole numbers with optional case-insensitive `k` or `m` suffixes, for example `50k`, `100k`, `1M`, `10M`, or `100000`.
+- **R1.11** New-goal token budget precedence SHALL be command-line `--tokens`, extension option `defaultTokenBudget`, `PI_GOAL_TOKEN_BUDGET`, trusted project config `.pi/pi-goal.json`, then the built-in default.
 
 ### R2. Goal status and command output
 
@@ -221,7 +224,7 @@ Requirement notation:
 - **R5.2** THE EXTENSION SHALL queue at most one automatic executor continuation at a time.
 - **R5.3** THE EXTENSION SHALL NOT continue when the goal is paused, verifying, blocked, complete, cleared, or budget-limited.
 - **R5.4** THE EXTENSION SHALL NOT continue when a queued continuation no longer matches the current branch, goal id, or generation.
-- **R5.5** THE EXTENSION SHALL enforce a default token budget of 100,000 goal-related model tokens.
+- **R5.5** THE EXTENSION SHALL enforce a default token budget of 10,000,000 goal-related model tokens.
 - **R5.6** THE EXTENSION SHALL enforce a default active goal time budget of 1 hour.
 - **R5.7** WHEN either budget is exhausted, THE EXTENSION SHALL stop goal-owned work and mark the goal `budget_limited` with `budgetReason` set to `tokens` or `time`.
 - **R5.8** The continuation prompt SHALL ask for one useful next increment, not broad indefinite work.
@@ -390,7 +393,7 @@ Then the extension may start the verifier if needed but SHALL NOT dispatch execu
 
 ### S17. Token budget stops loop
 
-Given an active goal has consumed its 100,000-token default budget,  
+Given an active goal has consumed its 10,000,000-token default budget,
 When continuation or verification would otherwise be dispatched,  
 Then the extension marks the goal `budget_limited` with `budgetReason: "tokens"`, persists state, updates UI, and does not dispatch more goal-driven work.
 
@@ -443,7 +446,7 @@ The implementation is accepted when all are true:
 1. `packages/pi-goal` exists with package name `@andrii-k6a/pi-goal`, README, LICENSE, source, and tests.
 2. The package and workspace target `@earendil-works/pi-coding-agent >= 0.84.1` because the spec relies on `agent_settled`, `ctx.thinkingLevel`, current CLI flags, and modern tool/event semantics.
 3. Root `package.json` registers `./packages/pi-goal/src/goal.ts` under `pi.extensions`.
-4. `/goal <objective>` creates an active, persisted branch-local goal with token budget 100,000 and time budget 1 hour.
+4. `/goal <objective>` creates an active, persisted branch-local goal with token budget 10,000,000 and time budget 1 hour, unless overridden by `--tokens`, option, environment, or trusted project config.
 5. `/goal`, `/goal status`, `/goal pause`, `/goal resume`, and `/goal clear` behave according to R1–R3 and the status behavior table.
 6. `pi_goal_claim_done` records a completion claim and transitions to `verifying`; it cannot mark a goal complete directly.
 7. `pi_goal_blocked` enforces current id/generation and transitions active goals to blocked.
@@ -742,7 +745,7 @@ interface RuntimeState {
 
 Defaults:
 
-- `tokenBudget`: `100_000`
+- `tokenBudget`: `10_000_000`
 - `tokensUsed`: `0`
 - `timeBudgetMs`: `3_600_000` (1 hour)
 - `elapsedActiveMs`: `0`
@@ -1224,8 +1227,8 @@ Minimum UI:
 
 Status examples:
 
-- `🎯 goal 23k/100k · 12m/60m`
-- `🎯 goal verifying · 24k/100k · 14m/60m`
+- `🎯 goal 23k/10.0m · 12m/60m`
+- `🎯 goal verifying · 24k/10.0m · 14m/60m`
 - `🎯 verification failed`
 - `🎯 verification uncertain`
 - `🎯 goal paused`
@@ -1246,7 +1249,7 @@ No custom dashboard.
 
 Hard safety defaults:
 
-- Default token budget: 100,000 goal-related model tokens.
+- Default token budget: 10,000,000 goal-related model tokens.
 - Default active goal time budget: 1 hour.
 - No limit on executor turn count.
 - No limit on verification attempt count.
@@ -1548,7 +1551,7 @@ These decisions are part of the spec and should not be reopened during implement
 9. `/goal resume` keeps the goal id but increments `generation`; it cannot resume `budget_limited` goals.
 10. Tools are always registered and reject at runtime unless state/id/generation match.
 11. During goal-owned continuations, the extension additively enables only its two goal tools if needed and possible.
-12. The only goal-level limits are token budget and active-time budget: default `tokenBudget = 100_000`, default `timeBudgetMs = 3_600_000`.
+12. The only goal-level limits are token budget and active-time budget: default `tokenBudget = 10_000_000`, default `timeBudgetMs = 3_600_000`.
 13. There is no limit on number of executor turns and no limit on number of verification attempts except as naturally constrained by token/time budgets.
 14. The verifier subprocess must use the same model and same thinking level as the source Pi session; no fallback model is allowed.
 15. Budget limits are observed stop-after limits, not perfect pre-execution hard caps.

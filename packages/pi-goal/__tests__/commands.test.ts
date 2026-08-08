@@ -33,6 +33,48 @@ describe('goal command helpers', () => {
     });
   });
 
+  test('parses leading token budget option for created goals', () => {
+    assert.deepEqual(parseGoalCommand('--tokens 50k Ship feature'), {
+      type: 'create',
+      objective: 'Ship feature',
+      tokenBudget: 50_000
+    });
+    assert.deepEqual(parseGoalCommand('--tokens=100k Ship feature'), {
+      type: 'create',
+      objective: 'Ship feature',
+      tokenBudget: 100_000
+    });
+    assert.deepEqual(parseGoalCommand('--tokens 1M Ship feature'), {
+      type: 'create',
+      objective: 'Ship feature',
+      tokenBudget: 1_000_000
+    });
+    assert.deepEqual(parseGoalCommand('--tokens=10M Ship feature'), {
+      type: 'create',
+      objective: 'Ship feature',
+      tokenBudget: 10_000_000
+    });
+    assert.deepEqual(parseGoalCommand('--tokens 12345 Ship feature'), {
+      type: 'create',
+      objective: 'Ship feature',
+      tokenBudget: 12_345
+    });
+    assert.deepEqual(parseGoalCommand('Ship --tokens 1M'), {
+      type: 'create',
+      objective: 'Ship --tokens 1M'
+    });
+  });
+
+  test('rejects invalid token budget option', () => {
+    assert.throws(() => parseGoalCommand('--tokens Ship feature'), /Invalid token budget/);
+    assert.throws(() => parseGoalCommand('--tokens 0 Ship feature'), /Invalid token budget/);
+    assert.throws(() => parseGoalCommand('--tokens -1 Ship feature'), /Invalid token budget/);
+    assert.throws(() => parseGoalCommand('--tokens 1.5M Ship feature'), /Invalid token budget/);
+    assert.throws(() => parseGoalCommand('--tokens nope Ship feature'), /Invalid token budget/);
+    assert.throws(() => parseGoalCommand('--tokens 1M --tokens 2M Ship feature'), /Duplicate/);
+    assert.throws(() => parseGoalCommand('--tokens 1M'), /objective/);
+  });
+
   test('formats required status debugging fields', () => {
     const { state, clock } = goal();
     const status = formatGoalStatus(state, clock);
@@ -40,7 +82,7 @@ describe('goal command helpers', () => {
     assert.match(status, /Goal goal-1/);
     assert.match(status, /status: active/);
     assert.match(status, /generation: 0/);
-    assert.match(status, /tokens: 0\/100000/);
+    assert.match(status, /tokens: 0\/10000000/);
     assert.match(status, /active time:/);
     assert.match(status, /updated:/);
   });
@@ -57,7 +99,7 @@ describe('goal command helpers', () => {
 
   test('compact status reflects active and stopped states', () => {
     const { state, clock } = goal();
-    assert.match(compactStatus(state, clock) ?? '', /goal 0\/100k/);
+    assert.match(compactStatus(state, clock) ?? '', /goal 0\/10\.0m/);
     assert.match(compactStatus(pauseGoal(state, clock, 'user'), clock) ?? '', /paused/);
   });
 });

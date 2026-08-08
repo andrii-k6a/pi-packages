@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'vitest';
-import { createGoal } from '../src/state.js';
+import { createGoal, limitBudget } from '../src/state.js';
 import {
   findAssistantToolBatch,
   registerGoalTools,
@@ -111,16 +111,122 @@ describe('goal tools and terminal batch guard', () => {
       })?.reason ?? '',
       /terminal pi-goal tool/
     );
-    assert.match(
+    const reason =
       shouldBlockTerminalGoalBatch({
         eventToolName: 'pi_goal_claim_done',
         eventToolCallId: 'claim-1',
         eventInput: { goal_id: state.id, generation: 99, summary: 'done', evidence: 'proof' },
         branch,
         state
-      })?.reason ?? '',
-      /stale or invalid/
+      })?.reason ?? '';
+    assert.match(reason, /stale or invalid/);
+    assert.match(reason, /Current goal status=active/);
+    assert.match(reason, /expected goal_id="goal", generation=0/);
+    assert.match(reason, /provided goal_id="goal", generation=99/);
+    assert.doesNotMatch(reason, /proof/);
+  });
+
+  test('stale terminal call without discoverable batch blocks safely', () => {
+    const clock = new MutableClock();
+    const state = createGoal({
+      objective: 'done',
+      branchAnchorId: 'leaf',
+      ids: ids('goal'),
+      clock
+    });
+    const limited = limitBudget(state, clock, 'tokens');
+
+    const decision = shouldBlockTerminalGoalBatch({
+      eventToolName: 'pi_goal_claim_done',
+      eventToolCallId: 'claim-1',
+      eventInput: { goal_id: state.id, generation: 0, summary: 'done', evidence: 'proof' },
+      branch: [],
+      state: limited
+    });
+
+    assert.equal(decision?.block, true);
+    assert.equal(decision?.terminate, true);
+    assert.match(decision?.reason ?? '', /Current goal status is budget_limited/);
+    assert.match(decision?.reason ?? '', /terminal goal tools require active/);
+  });
+
+  test('current terminal call without discoverable batch is allowed', () => {
+    const clock = new MutableClock();
+    const state = createGoal({
+      objective: 'done',
+      branchAnchorId: 'leaf',
+      ids: ids('goal'),
+      clock
+    });
+
+    assert.equal(
+      shouldBlockTerminalGoalBatch({
+        eventToolName: 'pi_goal_claim_done',
+        eventToolCallId: 'claim-1',
+        eventInput: {
+          goal_id: state.id,
+          generation: 0,
+          summary: 'done',
+          evidence: 'proof'
+        },
+        branch: [],
+        state
+      }),
+      undefined
     );
+  });
+
+  test('terminal diagnostics redact claim payload text', () => {
+    const clock = new MutableClock();
+    const state = createGoal({
+      objective: 'done',
+      branchAnchorId: 'leaf',
+      ids: ids('goal'),
+      clock
+    });
+    const branch = branchWithToolCalls([
+      {
+        id: 'claim-1',
+        name: 'pi_goal_claim_done',
+        arguments: {
+          goal_id: state.id,
+          generation: 0,
+          summary: 'SECRET SUMMARY',
+          evidence: '   '
+        }
+      }
+    ]);
+
+    const reason =
+      shouldBlockTerminalGoalBatch({
+        eventToolName: 'pi_goal_claim_done',
+        eventToolCallId: 'claim-1',
+        eventInput: {
+          goal_id: state.id,
+          generation: 0,
+          summary: 'SECRET SUMMARY',
+          evidence: '   '
+        },
+        branch,
+        state
+      })?.reason ?? '';
+
+    assert.match(reason, /evidence is required after sanitization/);
+    assert.doesNotMatch(reason, /SECRET SUMMARY/);
+  });
+
+  test('terminal diagnostics include no-current-goal context', () => {
+    const decision = shouldBlockTerminalGoalBatch({
+      eventToolName: 'pi_goal_blocked',
+      eventToolCallId: 'block-1',
+      eventInput: { goal_id: 'goal', generation: 0, reason: 'Need user' },
+      branch: [],
+      state: undefined
+    });
+
+    assert.equal(decision?.block, true);
+    assert.match(decision?.reason ?? '', /Current goal status=none/);
+    assert.match(decision?.reason ?? '', /provided goal_id="goal", generation=0/);
   });
 
   test('finds current assistant tool batch by event id', () => {
