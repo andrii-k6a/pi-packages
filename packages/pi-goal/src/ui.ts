@@ -3,7 +3,7 @@ import { Box, Text } from '@earendil-works/pi-tui';
 import { compactStatus, formatGoalStatus } from './commands.js';
 import type { Clock } from './ids.js';
 import { CLAIM_ENTRY, VERIFICATION_ENTRY } from './persistence.js';
-import { excerpt, sanitizeText } from './sanitize.js';
+import { excerpt, sanitizeText, TEXT_LIMITS } from './sanitize.js';
 import type { CheckEvidence, CompletionClaim, GoalState, VerificationReport } from './state.js';
 
 const STATUS_KEY = 'pi-goal';
@@ -43,14 +43,12 @@ export function registerGoalUi(pi: Pick<ExtensionAPI, 'registerEntryRenderer'>):
     const claim = entry.data?.claim;
     if (!claim) return undefined;
 
-    const lines = [
-      theme.fg('accent', theme.bold('📌 Completion claim submitted')),
-      `${theme.fg('muted', 'Summary:')} ${excerpt(claim.summary, 180)}`,
-      `${theme.fg('muted', 'Evidence:')} ${excerpt(claim.evidence, 220)}`
-    ];
+    const lines = [theme.fg('accent', theme.bold('📌 Completion claim submitted'))];
+    addThemedSection(lines, theme, 'muted', 'Summary', claim.summary);
+    addThemedSection(lines, theme, 'muted', 'Evidence', claim.evidence);
 
     if (expanded) {
-      lines.push(theme.fg('dim', `Goal ${claim.goal_id} · generation ${claim.generation}`));
+      lines.push('', theme.fg('dim', `Goal ${claim.goal_id} · generation ${claim.generation}`));
       addChangedFiles(lines, claim.changed_files, theme);
       addChecks(lines, claim.checks, theme);
     }
@@ -69,37 +67,26 @@ export function registerGoalUi(pi: Pick<ExtensionAPI, 'registerEntryRenderer'>):
       const color = verificationColor(data);
       const lines = [theme.fg(color, theme.bold(title))];
 
-      if (data.claim_summary) {
-        lines.push(`${theme.fg('muted', 'Summary:')} ${excerpt(data.claim_summary, 180)}`);
-      }
+      addThemedSection(lines, theme, 'muted', 'Summary', data.claim_summary);
       if (report?.rationale) {
-        lines.push(`${theme.fg('muted', 'Verifier:')} ${excerpt(report.rationale, 220)}`);
-      } else if (data.reason) {
-        lines.push(`${theme.fg('muted', 'Reason:')} ${excerpt(data.reason, 220)}`);
+        addThemedSection(lines, theme, 'muted', 'Verifier', report.rationale);
+      } else {
+        addThemedSection(lines, theme, 'muted', 'Reason', data.reason);
       }
-      if (report?.next_action) {
-        lines.push(`${theme.fg('muted', 'Next:')} ${excerpt(report.next_action, 180)}`);
-      }
+      addThemedSection(lines, theme, 'muted', 'Next', report?.next_action);
 
       if (expanded) {
-        if (data.claim_evidence) {
-          lines.push(`${theme.fg('dim', 'Claim evidence:')} ${excerpt(data.claim_evidence, 240)}`);
-        }
+        addThemedSection(lines, theme, 'dim', 'Claim evidence', data.claim_evidence);
         addChangedFiles(lines, data.changed_files, theme);
         addChecks(lines, data.checks, theme);
         addReportDetails(lines, report, theme);
-        if (data.diagnostics && data.diagnostics.length > 0) {
-          lines.push(
-            `${theme.fg('dim', 'Diagnostics:')} ${data.diagnostics
-              .map((item) => excerpt(item, 120))
-              .join('; ')}`
-          );
-        }
+        addThemedList(lines, theme, 'dim', 'Diagnostics', data.diagnostics);
         if (typeof data.usageTokens === 'number') {
-          lines.push(theme.fg('dim', `Verifier tokens: ${data.usageTokens}`));
+          lines.push('', theme.fg('dim', `Verifier tokens: ${data.usageTokens}`));
         }
         if (data.goal_id) {
           lines.push(
+            '',
             theme.fg(
               'dim',
               `Goal ${data.goal_id} · generation ${data.generation ?? '?'} · claim ${
@@ -182,11 +169,9 @@ function goalWidgetLines(
 
   if (state.status === 'complete') {
     const lines = ['✅ Goal complete'];
-    if (state.lastSummary) lines.push(`Summary: ${excerpt(state.lastSummary, 180)}`);
-    if (state.lastVerification?.rationale) {
-      lines.push(`Verifier: ${excerpt(state.lastVerification.rationale, 220)}`);
-    }
-    if (state.lastEvidence) lines.push(`Evidence: ${excerpt(state.lastEvidence, 220)}`);
+    addPlainSection(lines, 'Summary', state.lastSummary);
+    addPlainSection(lines, 'Verifier', state.lastVerification?.rationale);
+    addPlainSection(lines, 'Evidence', state.lastEvidence);
     return lines;
   }
 
@@ -196,13 +181,11 @@ function goalWidgetLines(
         ? '⚠️ Verification uncertain'
         : '⚠️ Goal blocked';
     const lines = [title, objective];
-    if (state.lastVerification?.rationale) {
-      lines.push(`Verifier: ${excerpt(state.lastVerification.rationale, 220)}`);
-    }
+    addPlainSection(lines, 'Verifier', state.lastVerification?.rationale);
     if (state.lastVerification?.next_action) {
-      lines.push(`Next: ${excerpt(state.lastVerification.next_action, 180)}`);
-    } else if (state.blockedReason) {
-      lines.push(`Reason: ${excerpt(state.blockedReason, 180)}`);
+      addPlainSection(lines, 'Next', state.lastVerification.next_action);
+    } else {
+      addPlainSection(lines, 'Reason', state.blockedReason);
     }
     return lines;
   }
@@ -223,10 +206,8 @@ function goalWidgetLines(
 
   if (state.status === 'active' && state.lastVerification?.verdict !== undefined) {
     const lines = ['🎯 Goal active after verifier feedback', objective];
-    lines.push(`Verifier: ${excerpt(state.lastVerification.rationale, 220)}`);
-    if (state.lastVerification.next_action) {
-      lines.push(`Next: ${excerpt(state.lastVerification.next_action, 180)}`);
-    }
+    addPlainSection(lines, 'Verifier', state.lastVerification.rationale);
+    addPlainSection(lines, 'Next', state.lastVerification.next_action);
     return lines;
   }
 
@@ -259,27 +240,52 @@ function verificationColor(data: VerificationEntryData): 'success' | 'warning' |
   return 'warning';
 }
 
+function addPlainSection(lines: string[], label: string, value: string | undefined): void {
+  const text = displayBlock(value);
+  if (!text) return;
+  lines.push('', `${label}:`, ...text.split('\n'));
+}
+
+function addThemedSection(
+  lines: string[],
+  theme: EntryTheme,
+  color: string,
+  label: string,
+  value: string | undefined
+): void {
+  const text = displayBlock(value);
+  if (!text) return;
+  lines.push('', theme.fg(color, `${label}:`), ...text.split('\n'));
+}
+
+function addThemedList(
+  lines: string[],
+  theme: EntryTheme,
+  color: string,
+  label: string,
+  values: string[] | undefined
+): void {
+  const texts = values?.map(displayBlock).filter((text) => text.length > 0);
+  if (!texts || texts.length === 0) return;
+  lines.push('', theme.fg(color, `${label}:`));
+  for (const text of texts) addListItem(lines, text);
+}
+
 function addChangedFiles(
   lines: string[],
   changedFiles: string[] | undefined,
   theme: EntryTheme
 ): void {
-  if (!changedFiles || changedFiles.length === 0) return;
-  lines.push(
-    `${theme.fg('dim', 'Changed files:')} ${changedFiles.map((file) => excerpt(file, 80)).join(', ')}`
-  );
+  addThemedList(lines, theme, 'dim', 'Changed files', changedFiles?.map(displayInline));
 }
 
 function addChecks(lines: string[], checks: CheckEvidence[] | undefined, theme: EntryTheme): void {
   if (!checks || checks.length === 0) return;
-  lines.push(
-    `${theme.fg('dim', 'Checks:')} ${checks
-      .map((check) => {
-        const exit = check.exit_code === undefined ? '?' : String(check.exit_code);
-        return `${excerpt(check.command, 80)} (${exit})`;
-      })
-      .join('; ')}`
-  );
+  lines.push('', theme.fg('dim', 'Checks:'));
+  for (const check of checks) {
+    const exit = check.exit_code === undefined ? '?' : String(check.exit_code);
+    addListItem(lines, `${displayInline(check.command)} (${exit})`);
+  }
 }
 
 function addReportDetails(
@@ -288,25 +294,31 @@ function addReportDetails(
   theme: EntryTheme
 ): void {
   if (!report) return;
-  if (report.evidence_reviewed.length > 0) {
-    lines.push(
-      `${theme.fg('dim', 'Evidence reviewed:')} ${report.evidence_reviewed
-        .map((item) => excerpt(item, 100))
-        .join('; ')}`
-    );
-  }
-  if (report.missing_evidence && report.missing_evidence.length > 0) {
-    lines.push(
-      `${theme.fg('dim', 'Missing evidence:')} ${report.missing_evidence
-        .map((item) => excerpt(item, 100))
-        .join('; ')}`
-    );
-  }
-  if (report.risks && report.risks.length > 0) {
-    lines.push(
-      `${theme.fg('dim', 'Risks:')} ${report.risks.map((item) => excerpt(item, 100)).join('; ')}`
-    );
-  }
+  addThemedList(lines, theme, 'dim', 'Evidence reviewed', report.evidence_reviewed);
+  addThemedList(lines, theme, 'dim', 'Missing evidence', report.missing_evidence);
+  addThemedList(lines, theme, 'dim', 'Risks', report.risks);
+}
+
+function addListItem(lines: string[], text: string): void {
+  const [first = '', ...rest] = text.split('\n');
+  lines.push(`- ${first}`);
+  for (const line of rest) lines.push(`  ${line}`);
+}
+
+function displayBlock(value: string | undefined): string {
+  return sanitizeText(value, {
+    maxLength: Number.MAX_SAFE_INTEGER,
+    allowNewlines: true,
+    collapseWhitespace: false
+  });
+}
+
+function displayInline(value: string | undefined): string {
+  return sanitizeText(value, {
+    maxLength: Number.MAX_SAFE_INTEGER,
+    allowNewlines: false,
+    collapseWhitespace: true
+  });
 }
 
 function elapsedSince(startedAt: string, clock: Clock): number {
@@ -330,12 +342,12 @@ export function sanitizeVerificationClaimDetails(claim: CompletionClaim): {
 } {
   return {
     claim_summary: sanitizeText(claim.summary, {
-      maxLength: 1000,
+      maxLength: TEXT_LIMITS.summary,
       allowNewlines: true,
       collapseWhitespace: true
     }),
     claim_evidence: sanitizeText(claim.evidence, {
-      maxLength: 2000,
+      maxLength: TEXT_LIMITS.evidence,
       allowNewlines: true,
       collapseWhitespace: false
     }),
@@ -354,7 +366,7 @@ export function sanitizeVerificationClaimDetails(claim: CompletionClaim): {
       }),
       exit_code: check.exit_code,
       output_excerpt: sanitizeText(check.output_excerpt, {
-        maxLength: 1000,
+        maxLength: 2000,
         allowNewlines: true,
         collapseWhitespace: false
       })

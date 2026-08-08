@@ -7,9 +7,9 @@ import { describe, test } from 'vitest';
 import { GOAL_CONTINUATION_MESSAGE } from '../src/continuation.js';
 import { type GoalExtensionOptions, registerGoalExtension } from '../src/goal.js';
 import { estimateTokensFromModelPayload, estimateTokensFromText } from '../src/jsonl.js';
-import { STATE_ENTRY, VERIFICATION_ENTRY } from '../src/persistence.js';
+import { CLAIM_ENTRY, STATE_ENTRY, VERIFICATION_ENTRY } from '../src/persistence.js';
 import { TEXT_LIMITS } from '../src/sanitize.js';
-import type { GoalState } from '../src/state.js';
+import type { GoalState, VerificationReport } from '../src/state.js';
 import { GOAL_WIDGET_KEY } from '../src/ui.js';
 import type { VerifierRunInput, VerifierRunResult } from '../src/verifier.js';
 import { ids, MutableClock } from './helpers.js';
@@ -498,9 +498,10 @@ describe('pi-goal extension integration', () => {
 
     const finalWidget = ctx.widgets.get(GOAL_WIDGET_KEY)?.join('\n') ?? '';
     assert.match(finalWidget, /Goal complete/);
-    assert.match(finalWidget, /Summary: done/);
-    assert.match(finalWidget, /Verifier: evidence supports completion/);
-    assert.match(ctx.notifications.at(-1)?.message ?? '', /Goal complete: done/);
+    assert.match(finalWidget, /Summary:\s+done/);
+    assert.match(finalWidget, /Verifier:\s+evidence supports completion/);
+    assert.match(ctx.notifications.at(-1)?.message ?? '', /Goal complete/);
+    assert.match(ctx.notifications.at(-1)?.message ?? '', /Summary:\s+done/);
   });
 
   test('verification entry renderer includes final summary and verifier rationale', () => {
@@ -533,8 +534,110 @@ describe('pi-goal extension integration', () => {
       .join('\n');
 
     assert.match(rendered ?? '', /Goal complete/);
-    assert.match(rendered ?? '', /Summary: done/);
-    assert.match(rendered ?? '', /Verifier: evidence supports completion/);
+    assert.match(rendered ?? '', /Summary:\s+done/);
+    assert.match(rendered ?? '', /Verifier:\s+evidence supports completion/);
+  });
+
+  test('claim and verification cards keep long result text visible', () => {
+    const clock = new MutableClock();
+    const harness = createHarness({ ids: ids('goal'), clock });
+    registerGoalExtension(harness.pi as never, harness.options);
+    const claimRenderer = harness.entryRenderers.get(CLAIM_ENTRY) as TestEntryRenderer | undefined;
+    const verificationRenderer = harness.entryRenderers.get(VERIFICATION_ENTRY) as
+      | TestEntryRenderer
+      | undefined;
+    const summary = longText('summary', 'SUMMARY_END');
+    const evidence = longText('evidence', 'EVIDENCE_END');
+    const rationale = longText('rationale', 'RATIONALE_END');
+
+    const claimRendered = claimRenderer?.(
+      {
+        data: {
+          claim: {
+            goal_id: 'goal',
+            generation: 0,
+            claim_id: 'claim',
+            verifier_attempt_id: 'attempt',
+            summary,
+            evidence,
+            createdAt: clock.nowIso()
+          }
+        }
+      },
+      { expanded: false },
+      plainTheme
+    )
+      ?.render(100)
+      .join('\n');
+
+    const verificationRendered = verificationRenderer?.(
+      {
+        data: {
+          ok: true,
+          claim_summary: summary,
+          claim_evidence: evidence,
+          report: verifierReport(clock, { rationale })
+        }
+      },
+      { expanded: false },
+      plainTheme
+    )
+      ?.render(100)
+      .join('\n');
+
+    assert.match(claimRendered ?? '', /Summary:\s+summary/);
+    assert.match(claimRendered ?? '', /SUMMARY_END/);
+    assert.match(claimRendered ?? '', /Evidence:\s+evidence/);
+    assert.match(claimRendered ?? '', /EVIDENCE_END/);
+    assert.doesNotMatch(claimRendered ?? '', /\[truncated\]/);
+    assert.match(verificationRendered ?? '', /Summary:\s+summary/);
+    assert.match(verificationRendered ?? '', /SUMMARY_END/);
+    assert.match(verificationRendered ?? '', /Verifier:\s+rationale/);
+    assert.match(verificationRendered ?? '', /RATIONALE_END/);
+    assert.doesNotMatch(verificationRendered ?? '', /\[truncated\]/);
+  });
+
+  test('final goal widget and notification keep long result text visible', async () => {
+    const clock = new MutableClock();
+    const verifier = createDeferredVerifier();
+    const harness = createHarness({
+      ids: ids('goal', 'dispatch', 'claim', 'attempt'),
+      clock,
+      runVerifier: verifier.runVerifier
+    });
+    registerGoalExtension(harness.pi as never, harness.options);
+    const ctx = fakeCtx({ branch: [{ id: 'leaf' }], hasUI: true });
+    const summary = longText('summary', 'SUMMARY_END');
+    const evidence = longText('evidence', 'EVIDENCE_END');
+    const rationale = longText('rationale', 'RATIONALE_END');
+
+    await harness.commands.goal('Finish task', ctx);
+    await harness.tools.pi_goal_claim_done.execute(
+      'tool',
+      { goal_id: 'goal', generation: 0, summary, evidence },
+      undefined,
+      undefined,
+      ctx
+    );
+    harness.emit('agent_settled', {}, ctx);
+    verifier.resolve(verifierPass(clock, { rationale }));
+    await settleAsync();
+
+    const finalWidget = ctx.widgets.get(GOAL_WIDGET_KEY)?.join('\n') ?? '';
+    const notification = ctx.notifications.at(-1)?.message ?? '';
+
+    assert.match(finalWidget, /Summary:\s+summary/);
+    assert.match(finalWidget, /SUMMARY_END/);
+    assert.match(finalWidget, /Verifier:\s+rationale/);
+    assert.match(finalWidget, /RATIONALE_END/);
+    assert.match(finalWidget, /Evidence:\s+evidence/);
+    assert.match(finalWidget, /EVIDENCE_END/);
+    assert.doesNotMatch(finalWidget, /\[truncated\]/);
+    assert.match(notification, /Summary:\s+summary/);
+    assert.match(notification, /SUMMARY_END/);
+    assert.match(notification, /Verifier:\s+rationale/);
+    assert.match(notification, /RATIONALE_END/);
+    assert.doesNotMatch(notification, /\[truncated\]/);
   });
 
   test('duplicate agent_settled while verifying starts exactly one verifier', async () => {
@@ -1005,21 +1108,36 @@ function createDeferredVerifier() {
   };
 }
 
-function verifierPass(clock: MutableClock): VerifierRunResult {
+function longText(word: string, suffix: string): string {
+  return `${Array.from({ length: 40 }, () => word).join(' ')} ${suffix}`;
+}
+
+function verifierPass(
+  clock: MutableClock,
+  overrides: Partial<VerificationReport> = {}
+): VerifierRunResult {
   return {
     ok: true,
     usageTokens: 7,
     diagnostics: [],
-    report: {
-      goal_id: 'goal',
-      generation: 0,
-      claim_id: 'claim',
-      verifier_attempt_id: 'attempt',
-      verdict: 'pass',
-      rationale: 'evidence supports completion',
-      evidence_reviewed: ['proof'],
-      createdAt: clock.nowIso()
-    }
+    report: verifierReport(clock, overrides)
+  };
+}
+
+function verifierReport(
+  clock: MutableClock,
+  overrides: Partial<VerificationReport> = {}
+): VerificationReport {
+  return {
+    goal_id: 'goal',
+    generation: 0,
+    claim_id: 'claim',
+    verifier_attempt_id: 'attempt',
+    verdict: 'pass',
+    rationale: 'evidence supports completion',
+    evidence_reviewed: ['proof'],
+    createdAt: clock.nowIso(),
+    ...overrides
   };
 }
 

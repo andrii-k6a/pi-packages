@@ -30,7 +30,7 @@ import {
   TRANSITION_ENTRY,
   VERIFICATION_ENTRY
 } from './persistence.js';
-import { excerpt, sanitizeText, TEXT_LIMITS } from './sanitize.js';
+import { sanitizeText, TEXT_LIMITS } from './sanitize.js';
 import {
   addTokenUsage,
   applyVerificationError,
@@ -741,19 +741,51 @@ function notifyForVerifierReport(
   report: VerificationReport,
   state: GoalState
 ): void {
-  const rationale = excerpt(report.rationale, 140);
   if (report.verdict === 'pass') {
-    const summary = state.lastSummary ? `: ${excerpt(state.lastSummary, 120)}` : '';
-    notifyGoal(ctx, `Goal complete${summary}. Verifier: ${rationale}`, 'info');
+    notifyGoal(
+      ctx,
+      formatVerifierNotification('Goal complete.', [
+        ['Summary', state.lastSummary],
+        ['Verifier', report.rationale]
+      ]),
+      'info'
+    );
   } else if (report.verdict === 'fail') {
-    notifyGoal(ctx, `Verification failed: ${rationale}. Goal returned to active.`, 'warning');
+    notifyGoal(
+      ctx,
+      formatVerifierNotification('Verification failed. Goal returned to active.', [
+        ['Verifier', report.rationale],
+        ['Next', report.next_action]
+      ]),
+      'warning'
+    );
   } else {
     notifyGoal(
       ctx,
-      `Verification uncertain: ${rationale}. Goal blocked for user input.`,
+      formatVerifierNotification('Verification uncertain. Goal blocked for user input.', [
+        ['Verifier', report.rationale],
+        ['Next', report.next_action]
+      ]),
       'warning'
     );
   }
+}
+
+function formatVerifierNotification(
+  title: string,
+  sections: Array<[label: string, value: string | undefined]>
+): string {
+  const lines = [title];
+  for (const [label, value] of sections) {
+    const text = sanitizeText(value, {
+      maxLength: Number.MAX_SAFE_INTEGER,
+      allowNewlines: true,
+      collapseWhitespace: false
+    });
+    if (!text) continue;
+    lines.push('', `${label}:`, text);
+  }
+  return lines.join('\n');
 }
 
 function unrefTimer(timer: ReturnType<typeof setInterval>): void {
