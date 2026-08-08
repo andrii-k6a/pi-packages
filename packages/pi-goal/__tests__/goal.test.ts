@@ -498,10 +498,14 @@ describe('pi-goal extension integration', () => {
 
     const finalWidget = ctx.widgets.get(GOAL_WIDGET_KEY)?.join('\n') ?? '';
     assert.match(finalWidget, /Goal complete/);
-    assert.match(finalWidget, /Summary:\s+done/);
-    assert.match(finalWidget, /Verifier:\s+evidence supports completion/);
-    assert.match(ctx.notifications.at(-1)?.message ?? '', /Goal complete/);
-    assert.match(ctx.notifications.at(-1)?.message ?? '', /Summary:\s+done/);
+    assert.match(finalWidget, /Verified successfully/);
+    assert.match(finalWidget, /cards above/);
+    assert.doesNotMatch(finalWidget, /Summary:/);
+    assert.doesNotMatch(finalWidget, /Verifier:/);
+    assert.doesNotMatch(finalWidget, /Evidence:/);
+    assert.match(ctx.notifications.at(-1)?.message ?? '', /Goal complete after verification/);
+    assert.match(ctx.notifications.at(-1)?.message ?? '', /cards above/);
+    assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? '', /Summary:/);
   });
 
   test('verification entry renderer includes final summary and verifier rationale', () => {
@@ -597,7 +601,7 @@ describe('pi-goal extension integration', () => {
     assert.doesNotMatch(verificationRendered ?? '', /\[truncated\]/);
   });
 
-  test('final goal widget and notification keep long result text visible', async () => {
+  test('final goal widget and notification stay compact after long result text', async () => {
     const clock = new MutableClock();
     const verifier = createDeferredVerifier();
     const harness = createHarness({
@@ -626,18 +630,19 @@ describe('pi-goal extension integration', () => {
     const finalWidget = ctx.widgets.get(GOAL_WIDGET_KEY)?.join('\n') ?? '';
     const notification = ctx.notifications.at(-1)?.message ?? '';
 
-    assert.match(finalWidget, /Summary:\s+summary/);
-    assert.match(finalWidget, /SUMMARY_END/);
-    assert.match(finalWidget, /Verifier:\s+rationale/);
-    assert.match(finalWidget, /RATIONALE_END/);
-    assert.match(finalWidget, /Evidence:\s+evidence/);
-    assert.match(finalWidget, /EVIDENCE_END/);
-    assert.doesNotMatch(finalWidget, /\[truncated\]/);
-    assert.match(notification, /Summary:\s+summary/);
-    assert.match(notification, /SUMMARY_END/);
-    assert.match(notification, /Verifier:\s+rationale/);
-    assert.match(notification, /RATIONALE_END/);
-    assert.doesNotMatch(notification, /\[truncated\]/);
+    assert.match(finalWidget, /Goal complete/);
+    assert.match(finalWidget, /cards above/);
+    assert.doesNotMatch(finalWidget, /Summary:/);
+    assert.doesNotMatch(finalWidget, /Verifier:/);
+    assert.doesNotMatch(finalWidget, /Evidence:/);
+    assert.doesNotMatch(finalWidget, /SUMMARY_END|RATIONALE_END|EVIDENCE_END/);
+    assert.doesNotMatch(finalWidget, /\[truncated\]|widget truncated/);
+    assert.match(notification, /Goal complete after verification/);
+    assert.match(notification, /cards above/);
+    assert.doesNotMatch(notification, /Summary:/);
+    assert.doesNotMatch(notification, /Verifier:/);
+    assert.doesNotMatch(notification, /SUMMARY_END|RATIONALE_END|EVIDENCE_END/);
+    assert.doesNotMatch(notification, /\[truncated\]|widget truncated/);
   });
 
   test('duplicate agent_settled while verifying starts exactly one verifier', async () => {

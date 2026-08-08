@@ -168,11 +168,12 @@ function goalWidgetLines(
   }
 
   if (state.status === 'complete') {
-    const lines = ['✅ Goal complete'];
-    addPlainSection(lines, 'Summary', state.lastSummary);
-    addPlainSection(lines, 'Verifier', state.lastVerification?.rationale);
-    addPlainSection(lines, 'Evidence', state.lastEvidence);
-    return lines;
+    return [
+      '✅ Goal complete',
+      '',
+      'Verified successfully.',
+      'Full summary, verifier rationale, and evidence are in the cards above.'
+    ];
   }
 
   if (state.status === 'blocked') {

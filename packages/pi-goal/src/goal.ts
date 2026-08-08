@@ -739,53 +739,27 @@ function sanitizeVerificationReason(reason: string): string {
 function notifyForVerifierReport(
   ctx: ExtensionContext,
   report: VerificationReport,
-  state: GoalState
+  _state: GoalState
 ): void {
   if (report.verdict === 'pass') {
     notifyGoal(
       ctx,
-      formatVerifierNotification('Goal complete.', [
-        ['Summary', state.lastSummary],
-        ['Verifier', report.rationale]
-      ]),
+      'Goal complete after verification. See the completion claim and verification cards above for details.',
       'info'
     );
   } else if (report.verdict === 'fail') {
     notifyGoal(
       ctx,
-      formatVerifierNotification('Verification failed. Goal returned to active.', [
-        ['Verifier', report.rationale],
-        ['Next', report.next_action]
-      ]),
+      'Verification failed. Goal returned to active. See the verification card above for details and next action.',
       'warning'
     );
   } else {
     notifyGoal(
       ctx,
-      formatVerifierNotification('Verification uncertain. Goal blocked for user input.', [
-        ['Verifier', report.rationale],
-        ['Next', report.next_action]
-      ]),
+      'Verification uncertain. Goal blocked for user input. See the verification card above for details and next action.',
       'warning'
     );
   }
-}
-
-function formatVerifierNotification(
-  title: string,
-  sections: Array<[label: string, value: string | undefined]>
-): string {
-  const lines = [title];
-  for (const [label, value] of sections) {
-    const text = sanitizeText(value, {
-      maxLength: Number.MAX_SAFE_INTEGER,
-      allowNewlines: true,
-      collapseWhitespace: false
-    });
-    if (!text) continue;
-    lines.push('', `${label}:`, text);
-  }
-  return lines.join('\n');
 }
 
 function unrefTimer(timer: ReturnType<typeof setInterval>): void {
