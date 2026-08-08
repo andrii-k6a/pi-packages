@@ -28,7 +28,8 @@
       "./packages/pi-inspect/src/inspect.ts",
       "./packages/pi-generative-ui/src/index.ts",
       "./packages/pi-tmux-branch/src/tmux-branch.ts",
-      "./packages/pi-dynamic-workflows/src/index.ts"
+      "./packages/pi-dynamic-workflows/src/index.ts",
+      "./packages/pi-goal/src/goal.ts"
     ],
     "skills": [
       "./skills"
