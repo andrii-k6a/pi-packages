@@ -76,7 +76,7 @@ async function branchIntoPaneNow(
   direction: Direction,
   ctx: ExtensionContext
 ): Promise<void> {
-  if (!ctx.hasUI) {
+  if (ctx.mode !== 'tui') {
     ctx.ui.notify('Branch panes require the interactive Pi UI', 'error');
     return;
   }

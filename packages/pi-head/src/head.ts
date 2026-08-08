@@ -151,7 +151,7 @@ export default function headExtension(pi: ExtensionAPI) {
   pi.registerCommand('head', {
     description: 'Open the last assistant response from its first line with keyboard scrolling',
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI) {
+      if (ctx.mode !== 'tui') {
         ctx.ui.notify('/head requires interactive mode', 'error');
         return;
       }

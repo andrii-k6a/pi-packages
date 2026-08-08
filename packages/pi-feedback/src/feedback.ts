@@ -33,7 +33,7 @@ type TUI = {
 };
 
 type ReviewContext = {
-  hasUI: boolean;
+  mode: string;
   ui: {
     custom<T>(
       factory: (
@@ -290,7 +290,8 @@ export default function reviewFeedbackExtension(pi: ExtensionAPI) {
   let pendingReview: PendingReview | undefined;
 
   async function stageReview(ctx: ReviewContext, markdown: string): Promise<void> {
-    if (!ctx.hasUI) {
+    if (ctx.mode !== 'tui') {
+      ctx.ui.notify('/feedback requires interactive mode', 'error');
       return;
     }
 

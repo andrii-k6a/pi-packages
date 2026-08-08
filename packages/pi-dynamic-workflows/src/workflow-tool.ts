@@ -1,4 +1,9 @@
-import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent';
+import {
+  type CreateAgentSessionOptions,
+  defineTool,
+  type ExtensionContext,
+  type ToolDefinition
+} from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import {
@@ -100,10 +105,7 @@ export function createWorkflowTool(
           args: params.args,
           signal,
           concurrency: options.concurrency,
-          session: {
-            modelRegistry: ctx.modelRegistry,
-            model: ctx.model
-          },
+          session: createWorkflowSessionOptions(ctx),
           onLog(message) {
             snapshot.logs.push(message);
             update();
@@ -191,6 +193,42 @@ export function createWorkflowTool(
       return new Text(text?.type === 'text' ? text.text : theme.fg('muted', 'workflow'), 0, 0);
     }
   });
+}
+
+export function createWorkflowSessionOptions(
+  ctx: Pick<ExtensionContext, 'modelRegistry' | 'model' | 'thinkingLevel' | 'scopedModels'>
+): Partial<CreateAgentSessionOptions> {
+  return {
+    modelRuntime: getModelRuntime(ctx.modelRegistry),
+    model: ctx.model,
+    thinkingLevel: ctx.thinkingLevel,
+    scopedModels: [...ctx.scopedModels]
+  };
+}
+
+function getModelRuntime(
+  modelRegistry: unknown
+): NonNullable<CreateAgentSessionOptions['modelRuntime']> {
+  // Pi 0.84.1 exposes the current runtime to extensions only through ModelRegistry's
+  // private backing field, while createAgentSession() now requires modelRuntime. Keep this
+  // compatibility shim narrow, validated, and loud until Pi exposes a public accessor.
+  const runtime = (modelRegistry as { runtime?: unknown }).runtime;
+  if (!isModelRuntime(runtime)) {
+    throw new Error(
+      'workflow requires Pi ModelRuntime from ExtensionContext; current pi-coding-agent does not expose it publicly'
+    );
+  }
+  return runtime;
+}
+
+function isModelRuntime(
+  value: unknown
+): value is NonNullable<CreateAgentSessionOptions['modelRuntime']> {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return ['getAuth', 'getModel', 'getAvailable', 'hasConfiguredAuth', 'streamSimple'].every(
+    (method) => typeof candidate[method] === 'function'
+  );
 }
 
 function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
