@@ -3,7 +3,9 @@ import { parseVerificationReportText } from './claims.js';
 import { sanitizeText, TEXT_LIMITS } from './sanitize.js';
 import type { VerificationReport } from './state.js';
 
-const MAX_STDOUT_CHARS = 200_000;
+// Cap individual JSONL events, not the whole stream: large tool results must not hide
+// the later final assistant report.
+const MAX_JSONL_LINE_CHARS = 200_000;
 const MAX_ASSISTANT_MESSAGES = 20;
 const MAX_ASSISTANT_TEXT_CHARS = 40_000;
 const MAX_DIAGNOSTICS = 20;
@@ -58,28 +60,43 @@ export class PiJsonlCollector {
   #diagnostics: string[] = [];
   #usageTokens = 0;
   #usageEstimated = false;
-  #stdoutChars = 0;
-  #stdoutTruncated = false;
+  #skippingLongLine = false;
 
   write(chunk: string | Buffer): void {
-    if (this.#stdoutTruncated) return;
     let text = chunk.toString();
-    this.#stdoutChars += text.length;
-    if (this.#stdoutChars > MAX_STDOUT_CHARS) {
-      const keep = Math.max(0, text.length - (this.#stdoutChars - MAX_STDOUT_CHARS));
-      text = text.slice(0, keep);
-      this.#stdoutTruncated = true;
-      this.#pushDiagnostic('stdout exceeded verifier output cap; remaining output ignored');
+
+    while (text.length > 0) {
+      const newlineIndex = text.indexOf('\n');
+      const segment = newlineIndex === -1 ? text : text.slice(0, newlineIndex);
+      text = newlineIndex === -1 ? '' : text.slice(newlineIndex + 1);
+
+      if (this.#skippingLongLine) {
+        if (newlineIndex !== -1) this.#skippingLongLine = false;
+        continue;
+      }
+
+      const remainingLineChars = MAX_JSONL_LINE_CHARS - this.#buffer.length;
+      if (segment.length > remainingLineChars) {
+        this.#buffer = '';
+        this.#skippingLongLine = newlineIndex === -1;
+        this.#pushDiagnostic(
+          `stdout exceeded verifier output cap for one JSONL event (${MAX_JSONL_LINE_CHARS} chars); event skipped`
+        );
+        continue;
+      }
+
+      this.#buffer += segment;
+      if (newlineIndex !== -1) {
+        this.#processLine(this.#buffer);
+        this.#buffer = '';
+      }
     }
-    this.#buffer += text;
-    const lines = this.#buffer.split('\n');
-    this.#buffer = lines.pop() ?? '';
-    for (const line of lines) this.#processLine(line);
   }
 
   finish(): JsonlCollectorResult {
-    if (this.#buffer.trim()) this.#processLine(this.#buffer);
+    if (this.#buffer.trim() && !this.#skippingLongLine) this.#processLine(this.#buffer);
     this.#buffer = '';
+    this.#skippingLongLine = false;
     return {
       assistantMessages: [...this.#assistantMessages],
       diagnostics: [...this.#diagnostics],

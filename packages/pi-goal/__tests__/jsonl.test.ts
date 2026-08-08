@@ -45,6 +45,56 @@ describe('verifier JSONL parsing', () => {
     assert.equal(collected.assistantMessages.at(-1)?.usageEstimated, false);
   });
 
+  test('skips oversized tool-result events without losing final assistant report', () => {
+    const collector = new PiJsonlCollector();
+    const report = JSON.stringify({
+      goal_id: 'goal',
+      generation: 0,
+      claim_id: 'claim',
+      verifier_attempt_id: 'attempt',
+      verdict: 'pass',
+      rationale: 'ok',
+      evidence_reviewed: ['proof']
+    });
+    const largeToolResult = JSON.stringify({
+      type: 'message_start',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_1',
+        toolName: 'grep',
+        content: [{ type: 'text', text: 'x'.repeat(210_000) }]
+      }
+    });
+    const finalAssistant = JSON.stringify({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        provider: 'p',
+        model: 'm',
+        stopReason: 'stop',
+        usage: { totalTokens: 12, input: 5, output: 7, cacheRead: 0, cacheWrite: 0, cost: {} },
+        content: [{ type: 'text', text: report }]
+      }
+    });
+
+    collector.write(largeToolResult.slice(0, 50_000));
+    collector.write(`${largeToolResult.slice(50_000)}\n${finalAssistant}\n`);
+
+    const collected = collector.finish();
+    const result = parseFinalVerifierReport(collected, {
+      exitCode: 0,
+      requestedProvider: 'p',
+      requestedModel: 'm',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.report.verdict : undefined, 'pass');
+    assert.equal(result.usageTokens, 12);
+    assert.equal(collected.diagnostics.length, 1);
+    assert.match(collected.diagnostics[0] ?? '', /exceeded verifier output cap/);
+  });
+
   test('rejects markdown fences, additional properties, and schema violations', () => {
     assert.throws(
       () => parseVerificationReportText('```json\n{}\n```', '2026-01-01T00:00:00.000Z'),
