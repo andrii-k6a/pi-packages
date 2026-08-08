@@ -30,7 +30,7 @@ import {
   TRANSITION_ENTRY,
   VERIFICATION_ENTRY
 } from './persistence.js';
-import { sanitizeText, TEXT_LIMITS } from './sanitize.js';
+import { excerpt, sanitizeText, TEXT_LIMITS } from './sanitize.js';
 import {
   addTokenUsage,
   applyVerificationError,
@@ -53,7 +53,14 @@ import {
 } from './state.js';
 import { parseOptionalTokenBudget, TOKEN_BUDGET_ENV } from './token-budget.js';
 import { registerGoalTools } from './tools.js';
-import { notifyGoal, notifyGoalStatus, updateGoalUi } from './ui.js';
+import {
+  notifyGoal,
+  notifyGoalStatus,
+  registerGoalUi,
+  sanitizeVerificationClaimDetails,
+  updateGoalUi,
+  updateVerifierProgressUi
+} from './ui.js';
 import {
   remainingVerifierTime,
   resolveSourceModel,
@@ -89,6 +96,9 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
     'defaultTokenBudget option'
   );
   const runtime: RuntimeState = {};
+  let verifierProgressTimer: ReturnType<typeof setInterval> | undefined;
+
+  registerGoalUi(pi);
 
   const commitState = (
     next: GoalState,
@@ -131,7 +141,14 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
     runtime.continuationDispatch = undefined;
   };
 
+  const stopVerifierProgress = () => {
+    if (!verifierProgressTimer) return;
+    clearInterval(verifierProgressTimer);
+    verifierProgressTimer = undefined;
+  };
+
   const abortVerifier = () => {
+    stopVerifierProgress();
     runtime.verifierRunning?.abortController.abort();
     runtime.verifierRunning = undefined;
   };
@@ -492,6 +509,32 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
     return branchContainsLeaf(ctx.sessionManager.getBranch(), run.launchLeafId);
   }
 
+  function startVerifierProgress(
+    ctx: ExtensionContext,
+    claim: CompletionClaim,
+    abortController: AbortController,
+    sourceLabel: string
+  ): void {
+    stopVerifierProgress();
+    if (!ctx.hasUI) return;
+
+    const startedAt = clock.nowIso();
+    const refresh = () => {
+      if (abortController.signal.aborted) return;
+      const current = runtime.goal;
+      if (!current || !isVerifierAttemptCurrent(current, claim)) return;
+      updateVerifierProgressUi(ctx, current, clock, {
+        startedAt,
+        sourceLabel,
+        remainingTimeMs: remainingVerifierTime(current, clock)
+      });
+    };
+
+    refresh();
+    verifierProgressTimer = setInterval(refresh, 1000);
+    unrefTimer(verifierProgressTimer);
+  }
+
   function startVerifierIfNeeded(ctx: ExtensionContext): void {
     const state = runtime.goal;
     const claim = state?.pendingClaim;
@@ -512,6 +555,7 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
 
     const launchLeafId = getBranchLeafId(ctx.sessionManager.getBranch());
     const abortController = new AbortController();
+    const remainingTimeMs = remainingVerifierTime(state, clock);
     runtime.verifierRunning = {
       launchLeafId,
       goal_id: state.id,
@@ -521,14 +565,19 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
       abortController
     };
 
-    updateGoalUi(ctx, state, clock);
+    notifyGoal(
+      ctx,
+      `Verifier started for goal ${state.id} using ${source.cliModel} (${source.thinking}).`,
+      'info'
+    );
+    startVerifierProgress(ctx, claim, abortController, source.cliModel);
     void runVerifier({
       state,
       claim,
       launchLeafId,
       cwd: ctx.cwd,
       source,
-      remainingTimeMs: remainingVerifierTime(state, clock),
+      remainingTimeMs,
       signal: abortController.signal,
       clock
     })
@@ -561,6 +610,7 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
     }
 
     runtime.verifierRunning = undefined;
+    stopVerifierProgress();
     if ((!result.ok && result.invalidated) || running.abortController.signal.aborted) return;
 
     const state = runtime.goal;
@@ -598,7 +648,7 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
       }
 
       commitState(next, ctx, `verifier_${result.report.verdict}`);
-      notifyForVerifierReport(ctx, result.report);
+      notifyForVerifierReport(ctx, result.report, next);
       if (next.status === 'active') {
         maybeDispatchContinuation({ pi, runtime, ctx, clock, ids, commit: commitState });
       }
@@ -647,7 +697,8 @@ function appendVerificationRecord(
       })
     ),
     report: result.ok ? result.report : undefined,
-    reason: result.ok ? undefined : sanitizeVerificationReason(result.reason)
+    reason: result.ok ? undefined : sanitizeVerificationReason(result.reason),
+    ...sanitizeVerificationClaimDetails(claim)
   });
 }
 
@@ -665,7 +716,8 @@ function appendInterruptedVerificationRecord(
     usageTokens: 0,
     diagnostics: [],
     interrupted: true,
-    reason: sanitizeVerificationReason(`interrupted: ${reason}`)
+    reason: sanitizeVerificationReason(`interrupted: ${reason}`),
+    ...sanitizeVerificationClaimDetails(claim)
   });
 }
 
@@ -684,14 +736,29 @@ function sanitizeVerificationReason(reason: string): string {
   });
 }
 
-function notifyForVerifierReport(ctx: ExtensionContext, report: VerificationReport): void {
+function notifyForVerifierReport(
+  ctx: ExtensionContext,
+  report: VerificationReport,
+  state: GoalState
+): void {
+  const rationale = excerpt(report.rationale, 140);
   if (report.verdict === 'pass') {
-    notifyGoal(ctx, 'Goal complete after independent verification.', 'info');
+    const summary = state.lastSummary ? `: ${excerpt(state.lastSummary, 120)}` : '';
+    notifyGoal(ctx, `Goal complete${summary}. Verifier: ${rationale}`, 'info');
   } else if (report.verdict === 'fail') {
-    notifyGoal(ctx, 'Verification failed. Goal returned to active with feedback.', 'warning');
+    notifyGoal(ctx, `Verification failed: ${rationale}. Goal returned to active.`, 'warning');
   } else {
-    notifyGoal(ctx, 'Verification uncertain. Goal blocked for user input.', 'warning');
+    notifyGoal(
+      ctx,
+      `Verification uncertain: ${rationale}. Goal blocked for user input.`,
+      'warning'
+    );
   }
+}
+
+function unrefTimer(timer: ReturnType<typeof setInterval>): void {
+  if (typeof timer !== 'object' || timer === null) return;
+  (timer as { unref?: () => void }).unref?.();
 }
 
 function isAssistantMessage(

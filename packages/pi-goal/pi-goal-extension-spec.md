@@ -249,6 +249,8 @@ Requirement notation:
 - **R7.4** `/goal status` SHALL provide enough information to debug why the extension is or is not continuing or verifying.
 - **R7.5** THE EXTENSION SHALL persist bounded records for goal state, transitions, completion claims, and verification reports.
 - **R7.6** Persisted claim/report records SHALL be bounded before append, not only before display.
+- **R7.7** WHEN verifier work is in flight and UI is available, THE EXTENSION SHALL surface progress that makes clear verification is still running, including elapsed time, remaining active-time budget, the verifier model, and the claim under review.
+- **R7.8** WHEN verification finishes, THE EXTENSION SHALL surface the result with the executor claim summary and verifier rationale, not only a compact “complete”/“blocked” status indicator.
 
 ### R8. Safety
 
@@ -1222,7 +1224,9 @@ Rubric included in verifier task:
 Minimum UI:
 
 - Footer status via `ctx.ui.setStatus("pi-goal", text)`.
-- Notifications for create/pause/resume/clear/claim/verifier pass/verifier fail/verifier uncertain/budget limit when `ctx.hasUI`.
+- Notifications for create/pause/resume/clear/claim/verifier start/verifier pass/verifier fail/verifier uncertain/budget limit when `ctx.hasUI`.
+- A compact goal widget while verification is pending/running and after non-active outcomes.
+- Visible claim/verification custom-entry renderers so the final result remains in the transcript without adding model-visible context.
 - `/goal status` as command output/notification when UI supports it.
 
 Status examples:
@@ -1236,10 +1240,10 @@ Status examples:
 - `🎯 goal complete`
 - `🎯 goal limited`
 
-Optional compact widget:
+Compact widget:
 
 - Above editor.
-- Shows objective excerpt, status, token budget used/limit, active time used/limit, pending claim excerpt, and latest verifier rationale/next action.
+- Shows objective excerpt, status, pending claim excerpt, verifier progress while running, final summary/rationale on completion, and latest verifier rationale/next action on blocked or failed verification paths.
 - Keep under 7 lines.
 - Guard with `ctx.hasUI`; use TUI-specific custom components only under `ctx.mode === "tui"`.
 

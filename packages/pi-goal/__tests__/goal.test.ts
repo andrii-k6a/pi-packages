@@ -10,6 +10,7 @@ import { estimateTokensFromModelPayload, estimateTokensFromText } from '../src/j
 import { STATE_ENTRY, VERIFICATION_ENTRY } from '../src/persistence.js';
 import { TEXT_LIMITS } from '../src/sanitize.js';
 import type { GoalState } from '../src/state.js';
+import { GOAL_WIDGET_KEY } from '../src/ui.js';
 import type { VerifierRunInput, VerifierRunResult } from '../src/verifier.js';
 import { ids, MutableClock } from './helpers.js';
 
@@ -29,6 +30,22 @@ type VerificationClaimIds = Pick<
   NonNullable<GoalState['pendingClaim']>,
   'goal_id' | 'generation' | 'claim_id' | 'verifier_attempt_id'
 >;
+
+const plainTheme = {
+  fg: (_color: string, text: string) => text,
+  bg: (_color: string, text: string) => text,
+  bold: (text: string) => text
+};
+
+type TestEntryRenderer = (
+  entry: { data: unknown },
+  options: { expanded: boolean },
+  theme: typeof plainTheme
+) =>
+  | {
+      render(width: number): string[];
+    }
+  | undefined;
 
 describe('pi-goal extension integration', () => {
   test('/goal creates persisted active goal and queues continuation', async () => {
@@ -445,6 +462,79 @@ describe('pi-goal extension integration', () => {
     const completed = latestState(harness.appended);
     assert.equal(completed?.status, 'complete');
     assert.equal(completed?.tokensUsed, 7);
+    assert.equal(verificationRecords(harness.appended).at(-1)?.claim_summary, 'done');
+  });
+
+  test('verifier progress and final result are visible in the goal widget', async () => {
+    const clock = new MutableClock();
+    const verifier = createDeferredVerifier();
+    const harness = createHarness({
+      ids: ids('goal', 'dispatch', 'claim', 'attempt'),
+      clock,
+      runVerifier: verifier.runVerifier
+    });
+    registerGoalExtension(harness.pi as never, harness.options);
+    const ctx = fakeCtx({ branch: [{ id: 'leaf' }], hasUI: true });
+
+    await harness.commands.goal('Finish task', ctx);
+    await harness.tools.pi_goal_claim_done.execute(
+      'tool',
+      { goal_id: 'goal', generation: 0, summary: 'done', evidence: 'proof' },
+      undefined,
+      undefined,
+      ctx
+    );
+    harness.emit('agent_settled', {}, ctx);
+
+    assert.equal(verifier.calls.length, 1);
+    const progressWidget = ctx.widgets.get(GOAL_WIDGET_KEY)?.join('\n') ?? '';
+    assert.match(progressWidget, /Verifying goal/);
+    assert.match(progressWidget, /Claim: done/);
+    assert.match(progressWidget, /Verifier: running/);
+    assert.match(ctx.notifications.at(-1)?.message ?? '', /Verifier started/);
+
+    verifier.resolve(verifierPass(clock));
+    await settleAsync();
+
+    const finalWidget = ctx.widgets.get(GOAL_WIDGET_KEY)?.join('\n') ?? '';
+    assert.match(finalWidget, /Goal complete/);
+    assert.match(finalWidget, /Summary: done/);
+    assert.match(finalWidget, /Verifier: evidence supports completion/);
+    assert.match(ctx.notifications.at(-1)?.message ?? '', /Goal complete: done/);
+  });
+
+  test('verification entry renderer includes final summary and verifier rationale', () => {
+    const clock = new MutableClock();
+    const harness = createHarness({ ids: ids('goal'), clock });
+    registerGoalExtension(harness.pi as never, harness.options);
+    const renderer = harness.entryRenderers.get(VERIFICATION_ENTRY) as
+      | TestEntryRenderer
+      | undefined;
+
+    const pass = verifierPass(clock);
+    const rendered = renderer?.(
+      {
+        data: {
+          goal_id: 'goal',
+          generation: 0,
+          claim_id: 'claim',
+          verifier_attempt_id: 'attempt',
+          ok: true,
+          usageTokens: 7,
+          diagnostics: [],
+          claim_summary: 'done',
+          report: pass.ok ? pass.report : undefined
+        }
+      },
+      { expanded: false },
+      plainTheme
+    )
+      ?.render(100)
+      .join('\n');
+
+    assert.match(rendered ?? '', /Goal complete/);
+    assert.match(rendered ?? '', /Summary: done/);
+    assert.match(rendered ?? '', /Verifier: evidence supports completion/);
   });
 
   test('duplicate agent_settled while verifying starts exactly one verifier', async () => {
@@ -712,6 +802,7 @@ function createHarness(options: GoalExtensionOptions) {
   const events: Record<string, EventHandler[]> = {};
   const appended: Array<{ customType: string; data: unknown }> = [];
   const sent: unknown[] = [];
+  const entryRenderers = new Map<string, unknown>();
   let activeTools = ['read', 'bash'];
 
   return {
@@ -721,6 +812,7 @@ function createHarness(options: GoalExtensionOptions) {
     events,
     appended,
     sent,
+    entryRenderers,
     emit(name: string, event: unknown, ctx: ReturnType<typeof fakeCtx>) {
       for (const handler of events[name] ?? []) handler(event, ctx);
     },
@@ -730,6 +822,9 @@ function createHarness(options: GoalExtensionOptions) {
       },
       registerTool(tool: ToolDefinition & { name: string }) {
         tools[tool.name] = tool;
+      },
+      registerEntryRenderer(customType: string, renderer: unknown) {
+        entryRenderers.set(customType, renderer);
       },
       on(name: string, handler: EventHandler) {
         events[name] = [...(events[name] ?? []), handler];
@@ -764,12 +859,16 @@ function fakeCtx(input: {
   projectTrusted?: boolean;
 }) {
   const notifications: Array<{ message: string; type?: string }> = [];
+  const statuses = new Map<string, string | undefined>();
+  const widgets = new Map<string, string[]>();
   let abortCalls = 0;
   return {
     cwd: input.cwd ?? '/repo',
     mode: input.hasUI ? 'tui' : 'json',
     hasUI: input.hasUI,
     notifications,
+    statuses,
+    widgets,
     get abortCalls() {
       return abortCalls;
     },
@@ -786,7 +885,13 @@ function fakeCtx(input: {
       notify(message: string, type?: string) {
         notifications.push({ message, type });
       },
-      setStatus() {},
+      setStatus(key: string, text: string | undefined) {
+        statuses.set(key, text);
+      },
+      setWidget(key: string, content: string[] | undefined) {
+        if (content) widgets.set(key, content);
+        else widgets.delete(key);
+      },
       confirm: input.confirm ?? (async () => true)
     }
   };

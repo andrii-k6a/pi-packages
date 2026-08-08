@@ -53,6 +53,8 @@ Both tools require the current `goal_id` and `generation`. Stale calls are rejec
 5. The verifier receives only bounded goal/claim context, uses read-only built-in tools by default (`read`, `grep`, `find`, `ls`), and returns one strict JSON report.
 6. Only a current verifier `pass` marks the goal complete.
 
+While verification is running in TUI/RPC modes, the extension shows a verifier status/widget with elapsed time, remaining active-time budget, claim summary, and verifier model. When verification finishes, it writes a visible verification card and leaves a compact result widget with the final summary and verifier rationale, so completion is not just a footer status.
+
 Verifier `fail` returns the goal to `active` with bounded feedback. `uncertain`, invalid JSON, child failure, model mismatch, or schema failure blocks safely instead of completing.
 
 A verifier pass is evidence-backed acceptance, not proof of correctness.
@@ -115,6 +117,8 @@ Manual smoke test:
 ```bash
 pi -e ./packages/pi-goal
 ```
+
+Suggested TUI smoke check: start a small goal, let the executor submit a claim, confirm the verifier-running widget updates while the child verifier is active, and confirm the final verification card/result widget includes the claim summary and verifier rationale.
 
 ## License
 

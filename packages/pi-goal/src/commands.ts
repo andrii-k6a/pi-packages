@@ -92,7 +92,12 @@ export function formatGoalStatus(state: GoalState | undefined, clock: Clock): st
     lines.push(`claim id: ${state.pendingClaim.claim_id}`);
     lines.push(`verifier attempt: ${state.pendingClaim.verifier_attempt_id}`);
   } else if (state.lastSummary) {
-    lines.push(`latest claim: ${excerpt(state.lastSummary, 200)}`);
+    lines.push(
+      `${state.status === 'complete' ? 'final summary' : 'latest claim'}: ${excerpt(state.lastSummary, 200)}`
+    );
+    if (state.status === 'complete' && state.lastEvidence) {
+      lines.push(`final evidence: ${excerpt(state.lastEvidence, 240)}`);
+    }
   }
   if (state.lastVerification) {
     lines.push(`latest verification: ${state.lastVerification.verdict}`);
