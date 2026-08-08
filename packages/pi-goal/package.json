@@ -1,0 +1,30 @@
+{
+  "name": "@andrii-k6a/pi-goal",
+  "version": "0.1.0",
+  "description": "Pi extension for one verifier-gated branch-local goal loop.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "goal",
+    "verification"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/goal.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.84.1",
+    "@earendil-works/pi-ai": ">=0.84.1",
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
+    "typebox": "*"
+  }
+}
