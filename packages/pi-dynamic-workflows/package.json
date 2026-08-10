@@ -23,7 +23,7 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/dynamic-workflows.ts"
     ]
   },
   "dependencies": {

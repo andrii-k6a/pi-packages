@@ -7,7 +7,7 @@
   - `__tests__/` for Vitest tests (e.g., `index.test.ts`, `helpers.test.ts`).
   - `README.md`, `package.json`, and `LICENSE` per package.
 - Root-level configs live in `biome.json`, `tsconfig.json`, and `vitest.config.ts`.
-- When adding a package, keep its `src/<name>.ts` entry registered in the root `package.json` under `pi.extensions` and listed in the package `files` field.
+- When adding a package, give its extension entry point a descriptive, package-specific name such as `src/<slug>.ts` - never `src/index.ts` — so `pi config` can distinguish extensions. Register the entry in both the package's and root `package.json` `pi.extensions` fields, and include it in the package `files` field.
 
 ## Build, Test, and Development Commands
 Run these from the repo root unless noted:

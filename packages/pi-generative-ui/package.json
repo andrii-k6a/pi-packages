@@ -32,7 +32,7 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/generative-ui.ts"
     ]
   }
 }
