@@ -1,0 +1,31 @@
+{
+  "name": "@andrii-k6a/pi-caffeinate",
+  "version": "0.1.0",
+  "description": "Pi extension that keeps the computer awake while an agent run is active.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "caffeinate",
+    "awake",
+    "sleep"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/caffeinate.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.1"
+  },
+  "dependencies": {
+    "dbus-native": "^0.15.1"
+  }
+}

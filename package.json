@@ -30,7 +30,8 @@
       "./packages/pi-generative-ui/src/generative-ui.ts",
       "./packages/pi-tmux-branch/src/tmux-branch.ts",
       "./packages/pi-dynamic-workflows/src/dynamic-workflows.ts",
-      "./packages/pi-goal/src/goal.ts"
+      "./packages/pi-goal/src/goal.ts",
+      "./packages/pi-caffeinate/src/caffeinate.ts"
     ],
     "skills": [
       "./skills"
