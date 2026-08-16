@@ -75,6 +75,43 @@ return { inventory, summary }
 
 Phases are discovered as the script runs, so conditional and loop-created phases work naturally. If a branch is skipped, its phase does not show up as an empty progress row.
 
+### Approved routing profiles
+
+Subagents inherit the active session model and thinking level by default. To allow controlled routing, configure an approved set at `~/.pi/agent/pi-dynamic-workflows/profiles.json`:
+
+```json
+{
+  "profiles": [
+    {
+      "name": "fast",
+      "description": "Quick repository triage",
+      "provider": "openai",
+      "model": "configured-model-id",
+      "thinkingLevel": "low"
+    }
+  ]
+}
+```
+
+The file is user-owned and is loaded at extension startup or `/reload`. It is optional; without it, workflows retain normal session inheritance. Configuration is strict: malformed JSON, unknown keys, duplicate or blank fields, and invalid thinking levels stop the extension from loading rather than being ignored.
+
+Workflow authors can select **only profile names**, never raw model IDs:
+
+```js
+export const meta = {
+  name: 'review_project',
+  description: 'Review a project with controlled routing',
+  profile: 'fast',
+}
+
+phase('Deep review', { profile: 'thorough' })
+await agent('Inspect authentication boundaries.', { profile: 'fast' })
+```
+
+Selection precedence is agent > current runtime phase > workflow. Calling a later `phase('Name')` without a profile resets routing to the workflow profile (or inherited session settings), rather than preserving the previous phase's choice. Static `meta.phases` remains documentation only.
+
+Each selected profile resolves to its configured `provider` when present; otherwise its model resolves on the active session provider. A selected profile may therefore route a child session to another provider, but the workflow author can select only user-approved profile names—not arbitrary provider/model pairs. Unknown profiles, missing or unavailable configured-provider models, and unsupported thinking levels fail the workflow loudly with no fallback. When no profile is selected, or the profile configuration file is absent, child sessions retain the active session model and thinking level. The retired `model` option on `agent()` and phase metadata is rejected; use an approved named profile instead.
+
 ### Editor IntelliSense
 
 Reusable workflow files can opt into editor hints for workflow globals:
@@ -92,7 +129,7 @@ This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, an
 | `agent(prompt, opts)` | Spawn an isolated subagent. Returns its final text or, with `opts.schema`, a validated object. |
 | `parallel(thunks)` | Run an array of `() => agent(...)` thunks concurrently. Results are returned in input order. |
 | `pipeline(items, ...stages)` | Run each item through sequential stages while items fan out. Each stage receives `(prev, original, index)`. |
-| `phase(title)` | Mark the current phase. Used for grouping in the live progress view. |
+| `phase(title, { profile })` | Mark the current phase and optionally select an approved profile. Used for grouping in the live progress view. |
 | `log(message)` | Append a workflow-level log line. |
 | `args` | Optional JSON value passed in via the tool's `args` parameter. |
 | `cwd`, `process.cwd()` | Current working directory for subagents. |
@@ -150,6 +187,7 @@ Subagents run in fresh in-memory Pi sessions with the standard coding tools, so 
 | `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime. |
 | `src/workflow-tool.ts` | The Pi `workflow` tool, prompt guidelines, rendering, abort handling. |
 | `src/agent.ts` | `WorkflowAgent`, an in-memory Pi subagent runner. |
+| `src/profiles.ts` | User-owned approved profile loading and same-provider routing. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
 | `extensions/workflow.ts` | The Pi extension entrypoint. |

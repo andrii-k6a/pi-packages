@@ -14,6 +14,7 @@ import {
   renderWorkflowText,
   type WorkflowSnapshot
 } from './display.js';
+import { createWorkflowProfileResolver, type WorkflowProfile } from './profiles.js';
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from './workflow.js';
 
 const workflowToolSchema = Type.Object({
@@ -48,11 +49,14 @@ const workflowDisplayOptions = {
 export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
+  profiles?: readonly WorkflowProfile[];
 }
 
 export function createWorkflowTool(
   options: WorkflowToolOptions = {}
 ): ToolDefinition<typeof workflowToolSchema, unknown> {
+  const profileGuidelines = buildProfileGuidelines(options.profiles ?? []);
+
   return defineTool({
     name: 'workflow',
     label: 'Workflow',
@@ -76,7 +80,8 @@ export function createWorkflowTool(
       'For workflow, failed agent(), parallel(), or pipeline() branches return null and log the failure unless the workflow is aborted. Check for nulls before synthesizing conclusions.',
       'For workflow, include a final synthesis/assertion agent when combining multiple subagent results; return a compact JSON-serializable value with ok/verdict plus the important outputs.',
       'For workflow, if agent() needs machine-readable output, pass a plain JSON Schema via opts.schema; agent() will return the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.',
-      'For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.'
+      'For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.',
+      ...profileGuidelines
     ],
     parameters: workflowToolSchema,
     prepareArguments(args) {
@@ -106,6 +111,7 @@ export function createWorkflowTool(
           signal,
           concurrency: options.concurrency,
           session: createWorkflowSessionOptions(ctx),
+          profileResolver: createWorkflowProfileResolver(options.profiles ?? [], ctx),
           onLog(message) {
             snapshot.logs.push(message);
             update();
@@ -245,6 +251,17 @@ function normalizeWorkflowScript(script: string): string {
   const fence = text.match(/^```(?:js|javascript)?\s*\n([\s\S]*?)\n```$/i);
   if (fence) text = fence[1].trim();
   return text;
+}
+
+function buildProfileGuidelines(profiles: readonly WorkflowProfile[]): string[] {
+  if (profiles.length === 0) return [];
+  const approved = profiles
+    .map((profile) => `${JSON.stringify(profile.name)} — ${profile.description}`)
+    .join('; ');
+  return [
+    `For workflow, approved named profiles are: ${approved}.`,
+    'For workflow, select only an approved profile name with meta.profile for the whole workflow, phase(title, { profile }) for a phase, or agent(prompt, { profile }) for one subagent. Agent overrides phase, which overrides workflow. Omit profile to inherit the active session settings. Never use a raw model option.'
+  ];
 }
 
 function isAbortError(error: unknown): boolean {

@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { loadWorkflowProfiles } from './profiles.js';
 import { createWorkflowTool } from './workflow-tool.js';
 
 export default function extension(pi: ExtensionAPI) {
-  const workflowTool = createWorkflowTool();
+  const workflowTool = createWorkflowTool({ profiles: loadWorkflowProfiles() });
   pi.registerTool(workflowTool);
 
   pi.on('session_start', () => {
@@ -31,6 +32,18 @@ export {
   renderWorkflowLines,
   renderWorkflowText
 } from './display.js';
+export type {
+  ResolvedWorkflowProfile,
+  WorkflowProfile,
+  WorkflowProfileResolver,
+  WorkflowProfileResolverContext
+} from './profiles.js';
+export {
+  createWorkflowProfileResolver,
+  loadWorkflowProfiles,
+  WorkflowProfileRoutingError,
+  workflowProfilesPath
+} from './profiles.js';
 export type { StructuredOutputCapture, StructuredOutputToolOptions } from './structured-output.js';
 export { createStructuredOutputTool } from './structured-output.js';
 export type {

@@ -29,6 +29,10 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   signal?: AbortSignal;
 }
 
+interface InternalAgentRunOptions {
+  sessionOverride?: Pick<CreateAgentSessionOptions, 'model' | 'thinkingLevel'>;
+}
+
 export type AgentRunResult<TSchemaDef extends TSchema | undefined> = TSchemaDef extends TSchema
   ? Static<TSchemaDef>
   : string;
@@ -48,7 +52,7 @@ export class WorkflowAgent {
 
   async run<TSchemaDef extends TSchema | undefined = undefined>(
     prompt: string,
-    options: AgentRunOptions<TSchemaDef> = {}
+    options: AgentRunOptions<TSchemaDef> & InternalAgentRunOptions = {}
   ): Promise<AgentRunResult<TSchemaDef>> {
     // createStructuredOutputTool keeps the schema/capture pair type-safe internally; this
     // outer capture is read back through AgentRunResult<TSchemaDef> after Pi validates params.
@@ -69,7 +73,8 @@ export class WorkflowAgent {
       sessionManager: SessionManager.inMemory(this.cwd),
       settingsManager: SettingsManager.create(this.cwd, agentDir),
       customTools,
-      ...this.sessionOptions
+      ...this.sessionOptions,
+      ...options.sessionOverride
     });
 
     let removeAbortListener: (() => void) | undefined;
