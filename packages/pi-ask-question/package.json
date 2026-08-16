@@ -1,0 +1,30 @@
+{
+  "name": "@andrii-k6a/pi-ask-question",
+  "version": "0.1.0",
+  "description": "Pi extension that adds one ask_user_question tool: a terminal dialog of up to four multiple-choice questions returning structured answers.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "question",
+    "questionnaire",
+    "clarification"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/ask-question.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
+    "@earendil-works/pi-tui": ">=0.84.1",
+    "typebox": "*"
+  }
+}
