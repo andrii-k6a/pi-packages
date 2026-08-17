@@ -1,10 +1,15 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { openWorkflowProfileManager } from './profile-manager.js';
 import { loadWorkflowProfiles } from './profiles.js';
 import { createWorkflowTool } from './workflow-tool.js';
 
 export default function extension(pi: ExtensionAPI) {
   const workflowTool = createWorkflowTool({ profiles: loadWorkflowProfiles() });
   pi.registerTool(workflowTool);
+  pi.registerCommand('workflow-profiles', {
+    description: 'Create, edit, delete, and reload approved workflow routing profiles',
+    handler: async (_args, ctx) => openWorkflowProfileManager(ctx)
+  });
 
   pi.on('session_start', () => {
     const active = pi.getActiveTools();
@@ -32,6 +37,7 @@ export {
   renderWorkflowLines,
   renderWorkflowText
 } from './display.js';
+export { nextProfileIndex, selectedProfileIndex } from './profile-manager.js';
 export type {
   ResolvedWorkflowProfile,
   WorkflowProfile,
@@ -41,6 +47,8 @@ export type {
 export {
   createWorkflowProfileResolver,
   loadWorkflowProfiles,
+  parseWorkflowProfiles,
+  saveWorkflowProfiles,
   WorkflowProfileRoutingError,
   workflowProfilesPath
 } from './profiles.js';

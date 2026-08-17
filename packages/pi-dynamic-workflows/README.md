@@ -95,6 +95,8 @@ Subagents inherit the active session model and thinking level by default. To all
 
 The file is user-owned and is loaded at extension startup or `/reload`. It is optional; without it, workflows retain normal session inheritance. Configuration is strict: malformed JSON, unknown keys, duplicate or blank fields, and invalid thinking levels stop the extension from loading rather than being ignored.
 
+Manage profiles inside Pi with `/workflow-profiles`. The compact manager supports `j`/`k` or arrow navigation, `Enter`/`e` to edit, `n` to create, `d` to delete with confirmation, `r` to reload, and `q`/`Esc` to close. It uses native Pi dialogs and only offers currently available (and, when configured, session-scoped) provider/model/thinking combinations. Choosing the active session provider intentionally omits `provider` from the saved profile. The runtime reloads after each successful change so the `workflow` tool immediately uses the saved profiles.
+
 Workflow authors can select **only profile names**, never raw model IDs:
 
 ```js
@@ -187,7 +189,7 @@ Subagents run in fresh in-memory Pi sessions with the standard coding tools, so 
 | `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime. |
 | `src/workflow-tool.ts` | The Pi `workflow` tool, prompt guidelines, rendering, abort handling. |
 | `src/agent.ts` | `WorkflowAgent`, an in-memory Pi subagent runner. |
-| `src/profiles.ts` | User-owned approved profile loading and same-provider routing. |
+| `src/profiles.ts` | User-owned approved profile loading and provider-aware routing. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
 | `extensions/workflow.ts` | The Pi extension entrypoint. |

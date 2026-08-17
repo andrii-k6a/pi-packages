@@ -1,11 +1,49 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { type Api, getSupportedThinkingLevels, type Model } from '@earendil-works/pi-ai';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 const CONFIG_FILE_NAME = 'pi-dynamic-workflows/profiles.json';
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const MAX_ERROR_TEXT_LENGTH = 160;
+const TERMINAL_ESCAPE_INITIATORS = new Set([27, 144, 155, 157, 158, 159]);
+
+/** Removes C0, C1, and DEL characters before profile text reaches the terminal. */
+export function sanitizeWorkflowProfileText(value: string): string {
+  return value.replace(/\p{Cc}/gu, '');
+}
+
+function boundedProfileText(value: string, maxLength = MAX_ERROR_TEXT_LENGTH): string {
+  const characters = [...sanitizeWorkflowProfileText(value)].filter(
+    (character) => !TERMINAL_ESCAPE_INITIATORS.has(character.codePointAt(0) ?? -1)
+  );
+  return characters.length > maxLength
+    ? `${characters.slice(0, maxLength).join('')}…`
+    : characters.join('');
+}
+
+function describeProfileText(value: string): string {
+  return JSON.stringify(boundedProfileText(value));
+}
+
+function profileConfigPath(path: string): string {
+  return boundedProfileText(path);
+}
+
+function profileConfigError(path: string, message: string): Error {
+  return new Error(
+    `Invalid dynamic workflow profile configuration at ${profileConfigPath(path)}: ${message}`
+  );
+}
 
 export interface WorkflowProfile {
   name: string;
@@ -27,13 +65,18 @@ export interface WorkflowProfileResolverContext {
     find(provider: string, modelId: string): Model<Api> | undefined;
     getAvailable(): Model<Api>[];
   };
+  /** Empty or absent when no session model scope is configured. */
+  scopedModels?: readonly {
+    model: Model<Api>;
+    thinkingLevel?: ThinkingLevel;
+  }[];
 }
 
 export type WorkflowProfileResolver = (name: string) => ResolvedWorkflowProfile;
 
 export class WorkflowProfileRoutingError extends Error {
   constructor(profileName: string, reason: string) {
-    super(`Cannot route workflow profile ${JSON.stringify(profileName)}: ${reason}`);
+    super(`Cannot route workflow profile ${describeProfileText(profileName)}: ${reason}`);
     this.name = 'WorkflowProfileRoutingError';
   }
 }
@@ -51,11 +94,49 @@ export function loadWorkflowProfiles(agentDir = getAgentDir()): WorkflowProfile[
   try {
     config = JSON.parse(readFileSync(path, 'utf8'));
   } catch (error) {
-    const detail = error instanceof Error ? `: ${error.message}` : '';
-    throw new Error(`Invalid dynamic workflow profile configuration at ${path}${detail}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw profileConfigError(
+      path,
+      `invalid JSON${message ? `: ${boundedProfileText(message)}` : ''}`
+    );
   }
 
   return parseWorkflowProfiles(config, path);
+}
+
+/**
+ * Validates and atomically persists user-owned workflow profiles.
+ *
+ * The parser is intentionally shared with loading so manager writes can never create a
+ * configuration that the extension would reject on its subsequent runtime reload.
+ */
+export function saveWorkflowProfiles(
+  profiles: unknown,
+  agentDir = getAgentDir()
+): WorkflowProfile[] {
+  const path = workflowProfilesPath(agentDir);
+  const validated = parseWorkflowProfiles({ profiles }, path);
+  const directory = dirname(path);
+  const temporaryPath = join(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify({ profiles: validated }, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx'
+    });
+    renameSync(temporaryPath, path);
+  } catch (error) {
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The temporary file was never created or has already been moved into place.
+    }
+    throw error;
+  }
+
+  return validated;
 }
 
 export function createWorkflowProfileResolver(
@@ -93,6 +174,26 @@ export function createWorkflowProfileResolver(
       );
     }
 
+    const scopedModels = context.scopedModels ?? [];
+    const scopedModel = scopedModels.find(
+      ({ model: scoped }) => scoped.provider === model.provider && scoped.id === model.id
+    );
+    if (scopedModels.length > 0 && !scopedModel) {
+      throw new WorkflowProfileRoutingError(
+        name,
+        'the configured model is outside the session model scope'
+      );
+    }
+    if (
+      scopedModel?.thinkingLevel !== undefined &&
+      profile.thinkingLevel !== scopedModel.thinkingLevel
+    ) {
+      throw new WorkflowProfileRoutingError(
+        name,
+        'the configured thinking level does not match the session-scoped model pin'
+      );
+    }
+
     if (!getSupportedThinkingLevels(model).includes(profile.thinkingLevel)) {
       throw new WorkflowProfileRoutingError(
         name,
@@ -104,16 +205,11 @@ export function createWorkflowProfileResolver(
   };
 }
 
-function parseWorkflowProfiles(config: unknown, path: string): WorkflowProfile[] {
-  if (!isRecord(config))
-    throw new Error(
-      `Invalid dynamic workflow profile configuration at ${path}: expected an object`
-    );
+export function parseWorkflowProfiles(config: unknown, path: string): WorkflowProfile[] {
+  if (!isRecord(config)) throw profileConfigError(path, 'expected an object');
   assertOnlyKeys(config, ['profiles'], 'configuration', path);
   if (!Array.isArray(config.profiles)) {
-    throw new Error(
-      `Invalid dynamic workflow profile configuration at ${path}: profiles must be an array`
-    );
+    throw profileConfigError(path, 'profiles must be an array');
   }
 
   const names = new Set<string>();
@@ -134,7 +230,8 @@ function parseWorkflowProfiles(config: unknown, path: string): WorkflowProfile[]
       model: requiredText(item.model, `${itemPath}.model`, path),
       thinkingLevel: requiredThinkingLevel(item.thinkingLevel, `${itemPath}.thinkingLevel`, path)
     };
-    if (names.has(profile.name)) invalidConfig(path, `${itemPath}.name duplicates ${profile.name}`);
+    if (names.has(profile.name))
+      invalidConfig(path, `${itemPath}.name duplicates ${describeProfileText(profile.name)}`);
     names.add(profile.name);
     return profile;
   });
@@ -151,13 +248,16 @@ function assertOnlyKeys(
   path: string
 ): void {
   for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) invalidConfig(path, `${name} has unknown key ${key}`);
+    if (!allowed.includes(key))
+      invalidConfig(path, `${name} has unknown key ${describeProfileText(key)}`);
   }
 }
 
 function requiredText(value: unknown, name: string, path: string): string {
   if (typeof value !== 'string' || !value.trim())
     invalidConfig(path, `${name} must be a non-empty string`);
+  if (sanitizeWorkflowProfileText(value) !== value)
+    invalidConfig(path, `${name} must not contain terminal control characters`);
   return value.trim();
 }
 
@@ -174,5 +274,5 @@ function requiredThinkingLevel(value: unknown, name: string, path: string): Thin
 }
 
 function invalidConfig(path: string, message: string): never {
-  throw new Error(`Invalid dynamic workflow profile configuration at ${path}: ${message}`);
+  throw profileConfigError(path, message);
 }
