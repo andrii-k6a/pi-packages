@@ -104,6 +104,12 @@ test('renderWorkflowText respects log limits', () => {
   assert.match(text, /log: third/);
 });
 
+test('renderWorkflowLines shows the selected profile on an agent row', () => {
+  const lines = renderWorkflowLines(snapshot({ agents: [agent({ profile: 'fast' })] }));
+
+  assert.ok(lines.some((line) => line.includes('#1 ✓ scan repo · profile: fast')));
+});
+
 test('renderWorkflowLines separates logs from progress', () => {
   const lines = renderWorkflowLines(
     snapshot({

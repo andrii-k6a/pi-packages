@@ -7,6 +7,7 @@ export interface WorkflowAgentSnapshot {
   id: number;
   label: string;
   phase?: string;
+  profile?: string;
   prompt: string;
   status: WorkflowAgentStatus;
   resultPreview?: string;
@@ -173,7 +174,9 @@ export function renderWorkflowLines(
     for (const agent of visibleAgents) {
       const order = `#${agent.id}`;
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : '';
-      lines.push(`    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${result}`);
+      lines.push(
+        `    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${profileSuffix(agent)}${result}`
+      );
     }
     if (agents.length > visibleAgents.length)
       lines.push(`    … ${agents.length - visibleAgents.length} earlier agents`);
@@ -185,7 +188,7 @@ export function renderWorkflowLines(
     for (const agent of unphased.slice(-maxAgents)) {
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : '';
       lines.push(
-        `    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${result}`
+        `    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${profileSuffix(agent)}${result}`
       );
     }
   }
@@ -212,6 +215,10 @@ function statusLine(snapshot: WorkflowSnapshot, completed: boolean): string {
   if (snapshot.runningCount > 0)
     return `workflow ${snapshot.name}: ${snapshot.runningCount} running, ${snapshot.doneCount}/${snapshot.agentCount} done`;
   return `workflow ${snapshot.name}: ${snapshot.doneCount}/${snapshot.agentCount} done`;
+}
+
+function profileSuffix(agent: WorkflowAgentSnapshot): string {
+  return agent.profile ? ` · profile: ${shorten(agent.profile, 32)}` : '';
 }
 
 function statusIcon(status: WorkflowAgentStatus): string {

@@ -57,3 +57,44 @@ test('createWorkflowTool describes phases as optional and dynamic', () => {
     )
   );
 });
+
+test('createWorkflowTool omits profile guidance when no profiles are configured', () => {
+  const guidance = createWorkflowTool().promptGuidelines?.join('\n') ?? '';
+
+  assert.doesNotMatch(guidance, /Available profiles:/);
+  assert.doesNotMatch(guidance, /Profile precedence/);
+});
+
+test('createWorkflowTool exposes profile names and descriptions without routing internals', () => {
+  const tool = createWorkflowTool({
+    profiles: [
+      {
+        name: 'fast',
+        description: 'Quick repository triage',
+        provider: 'SENTINEL_PROVIDER',
+        model: 'SENTINEL_RAW_MODEL',
+        thinkingLevel: 'xhigh'
+      },
+      {
+        name: 'thorough',
+        description: 'Careful architecture review',
+        provider: 'SECOND_SENTINEL_PROVIDER',
+        model: 'SECOND_SENTINEL_RAW_MODEL',
+        thinkingLevel: 'high'
+      }
+    ]
+  });
+  const guidance = tool.promptGuidelines?.at(-1) ?? '';
+
+  assert.match(guidance, /^- "fast" — Quick repository triage$/m);
+  assert.match(guidance, /^- "thorough" — Careful architecture review$/m);
+  assert.match(guidance, /profile order has no meaning/);
+  assert.match(
+    guidance,
+    /profile: "<profile-name>".*phase\("Review", \{ profile: "<profile-name>" \}\).*agent\("\.\.\.", \{ profile: "<profile-name>" \}\)/s
+  );
+  assert.match(guidance, /agent > phase > workflow > active session/);
+  assert.match(guidance, /`phase\("Next phase"\)` without `profile` resets routing/);
+  assert.match(guidance, /`meta\.phases` is documentation only/);
+  assert.doesNotMatch(guidance, /SENTINEL_PROVIDER|SENTINEL_RAW_MODEL|xhigh|high/);
+});

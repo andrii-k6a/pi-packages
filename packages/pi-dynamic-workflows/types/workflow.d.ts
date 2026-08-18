@@ -14,6 +14,8 @@ declare global {
     name: string;
     description: string;
     whenToUse?: string;
+    /** Optional approved profile name for all subagents unless a runtime phase or agent overrides it. */
+    profile?: string;
     /** Optional documentation for an expected outline. Live progress is driven by `phase(...)`. */
     phases?: WorkflowMetaPhase[];
   }
@@ -21,7 +23,8 @@ declare global {
   interface WorkflowMetaPhase {
     title: string;
     detail?: string;
-    model?: string;
+    /** Optional approved profile name. This metadata documents the expected outline only. */
+    profile?: string;
   }
 
   interface WorkflowAgentOptions<TSchema = JsonSchema> {
@@ -31,8 +34,8 @@ declare global {
     phase?: string;
     /** JSON Schema for structured output. When present, the returned value is typed as unknown unless you provide a generic. */
     schema?: TSchema;
-    /** Requested model name. Currently passed as subagent guidance. */
-    model?: string;
+    /** Optional approved profile name for this subagent. */
+    profile?: string;
     /** Requested isolation mode. */
     isolation?: 'worktree';
     /** Requested subagent role/type. */
@@ -75,8 +78,8 @@ declare global {
     ...stages: Array<(previous: unknown, original: TItem, index: number) => TResult | Promise<TResult>>
   ): Promise<TResult[]>;
 
-  /** Mark the current workflow phase for progress grouping. */
-  function phase(title: string): void;
+  /** Mark the current workflow phase for progress grouping and optionally select an approved profile. */
+  function phase(title: string, options?: { profile?: string }): void;
 
   /** Append a workflow-level log line. */
   function log(message: unknown): void;

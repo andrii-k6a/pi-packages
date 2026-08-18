@@ -3,17 +3,23 @@ import type { Node } from 'acorn';
 import { parse } from 'acorn';
 import type { TSchema } from 'typebox';
 import { WorkflowAgent, type WorkflowAgentOptions } from './agent.js';
+import {
+  type ResolvedWorkflowProfile,
+  type WorkflowProfileResolver,
+  WorkflowProfileRoutingError
+} from './profiles.js';
 
 export interface WorkflowMetaPhase {
   title: string;
   detail?: string;
-  model?: string;
+  profile?: string;
 }
 
 export interface WorkflowMeta {
   name: string;
   description: string;
   whenToUse?: string;
+  profile?: string;
   phases?: WorkflowMetaPhase[];
 }
 
@@ -23,9 +29,15 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   concurrency?: number;
   tokenBudget?: number | null;
   signal?: AbortSignal;
+  profileResolver?: WorkflowProfileResolver;
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
-  onAgentStart?: (event: { label: string; phase?: string; prompt: string }) => void;
+  onAgentStart?: (event: {
+    label: string;
+    phase?: string;
+    profile?: string;
+    prompt: string;
+  }) => void;
   onAgentEnd?: (event: { label: string; phase?: string; result: unknown }) => void;
 }
 
@@ -42,13 +54,16 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   label?: string;
   phase?: string;
   schema?: TSchemaDef;
-  model?: string;
+  profile?: string;
   isolation?: 'worktree';
   agentType?: string;
 }
 
 interface RuntimeState {
   currentPhase?: string;
+  currentProfile?: ResolvedWorkflowProfile;
+  currentProfileName?: string;
+  profileRoutingError?: WorkflowProfileRoutingError;
   logs: string[];
   phases: string[];
   agentCount: number;
@@ -69,7 +84,18 @@ export async function runWorkflow<T = unknown>(
 ): Promise<WorkflowRunResult<T>> {
   const started = Date.now();
   const { meta, body } = parseWorkflowScript(script);
-  const state: RuntimeState = { logs: [], phases: [], agentCount: 0, spent: 0 };
+  const workflowProfileName = meta.profile;
+  const workflowProfile = workflowProfileName
+    ? resolveProfile(workflowProfileName, options.profileResolver)
+    : undefined;
+  const state: RuntimeState = {
+    currentProfile: workflowProfile,
+    currentProfileName: workflowProfileName,
+    logs: [],
+    phases: [],
+    agentCount: 0,
+    spent: 0
+  };
   const agentRunner = options.agent ?? new WorkflowAgent(options);
   const concurrency = Math.max(
     1,
@@ -87,9 +113,14 @@ export async function runWorkflow<T = unknown>(
     options.onLog?.(text);
   };
 
-  const phase = (title: unknown) => {
+  const phase = (title: unknown, phaseOptions: unknown = {}) => {
     const text = requireString(title, 'phase title');
+    const normalizedOptions = normalizePhaseOptions(phaseOptions);
     state.currentPhase = text;
+    state.currentProfileName = normalizedOptions.profile ?? workflowProfileName;
+    state.currentProfile = state.currentProfileName
+      ? resolveProfile(state.currentProfileName, options.profileResolver)
+      : undefined;
     if (!state.phases.includes(text)) state.phases.push(text);
     options.onPhase?.(text);
   };
@@ -105,43 +136,74 @@ export async function runWorkflow<T = unknown>(
     if (options.signal?.aborted) throw new Error('workflow aborted');
   };
 
-  const agent = async (prompt: unknown, agentOptions: unknown = {}) => {
-    throwIfAborted();
-    if (budget.total !== null && budget.remaining() <= 0)
-      throw new Error('workflow token budget exhausted');
-    const taskPrompt = requireString(prompt, 'agent prompt');
-    const normalizedOptions = normalizeAgentOptions(agentOptions);
-    const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
-    const requestedLabel = normalizedOptions.label?.trim();
+  const trackAgentRun = <T>(run: Promise<T>): Promise<T> => {
+    pendingAgentRuns.add(run);
+    run.then(
+      () => pendingAgentRuns.delete(run),
+      (error) => {
+        pendingAgentRuns.delete(run);
+        if (error instanceof WorkflowProfileRoutingError) {
+          state.profileRoutingError ??= error;
+        }
+      }
+    );
+    return run;
+  };
+
+  const agent = (prompt: unknown, agentOptions: unknown = {}): Promise<unknown> => {
+    let taskPrompt: string;
+    let normalizedOptions: AgentOptions;
+    let assignedPhase: string | undefined;
+    let requestedLabel: string | undefined;
+    let profileName: string | undefined;
+    let profile: ResolvedWorkflowProfile | undefined;
+    try {
+      throwIfAborted();
+      if (budget.total !== null && budget.remaining() <= 0)
+        throw new Error('workflow token budget exhausted');
+      taskPrompt = requireString(prompt, 'agent prompt');
+      normalizedOptions = normalizeAgentOptions(agentOptions);
+      assignedPhase = normalizedOptions.phase ?? state.currentPhase;
+      requestedLabel = normalizedOptions.label?.trim();
+      profileName = normalizedOptions.profile ?? state.currentProfileName;
+      profile = normalizedOptions.profile
+        ? resolveProfile(normalizedOptions.profile, options.profileResolver)
+        : state.currentProfile;
+    } catch (error) {
+      if (error instanceof WorkflowProfileRoutingError) state.profileRoutingError ??= error;
+      return trackAgentRun(Promise.reject(error));
+    }
+
     const run = limiter(async () => {
       state.agentCount++;
       const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
-      options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
+      options.onAgentStart?.({
+        label,
+        phase: assignedPhase,
+        profile: profileName,
+        prompt: taskPrompt
+      });
       try {
         throwIfAborted();
         const result = await agentRunner.run(taskPrompt, {
           label,
           schema: normalizedOptions.schema,
           signal: options.signal,
-          instructions: buildAgentInstructions(assignedPhase, normalizedOptions)
+          instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
+          sessionOverride: profile
         });
         throwIfAborted();
         state.spent += estimateTokens(result);
         options.onAgentEnd?.({ label, phase: assignedPhase, result });
         return result;
       } catch (error) {
-        if (options.signal?.aborted) throw error;
+        if (options.signal?.aborted || error instanceof WorkflowProfileRoutingError) throw error;
         log(`agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
         options.onAgentEnd?.({ label, phase: assignedPhase, result: null });
         return null;
       }
     });
-    pendingAgentRuns.add(run);
-    run.then(
-      () => pendingAgentRuns.delete(run),
-      () => pendingAgentRuns.delete(run)
-    );
-    return run;
+    return trackAgentRun(run);
   };
 
   const parallel = async (thunks: Array<() => Promise<unknown>>) => {
@@ -157,7 +219,7 @@ export async function runWorkflow<T = unknown>(
         try {
           return await thunk();
         } catch (error) {
-          if (options.signal?.aborted) throw error;
+          if (options.signal?.aborted || error instanceof WorkflowProfileRoutingError) throw error;
           log(
             `parallel[${index}] failed: ${error instanceof Error ? error.message : String(error)}`
           );
@@ -188,7 +250,8 @@ export async function runWorkflow<T = unknown>(
             value = await stage(value, item, index);
             throwIfAborted();
           } catch (error) {
-            if (options.signal?.aborted) throw error;
+            if (options.signal?.aborted || error instanceof WorkflowProfileRoutingError)
+              throw error;
             log(
               `pipeline[${index}] failed: ${error instanceof Error ? error.message : String(error)}`
             );
@@ -233,6 +296,7 @@ export async function runWorkflow<T = unknown>(
     filename: `${meta.name || 'workflow'}.js`
   }).runInContext(context);
   await Promise.allSettled([...pendingAgentRuns]);
+  if (state.profileRoutingError) throw state.profileRoutingError;
   assertStructuredCloneable(result, 'workflow result');
   return {
     meta,
@@ -408,13 +472,15 @@ function staticStringOf(node: AnyNode | undefined): string | undefined {
 
 function validateMeta(meta: unknown): asserts meta is WorkflowMeta {
   if (!meta || typeof meta !== 'object') throw new Error('meta must be an object');
-  const value = meta as WorkflowMeta;
+  const value = meta as WorkflowMeta & { model?: unknown };
+  if ('model' in value) throwProfileMigrationError('meta');
   if (typeof value.name !== 'string' || !value.name.trim())
     throw new Error('meta.name must be a non-empty string');
   if (typeof value.description !== 'string' || !value.description.trim())
     throw new Error('meta.description must be a non-empty string');
   if (value.whenToUse !== undefined && typeof value.whenToUse !== 'string')
     throw new Error('meta.whenToUse must be a string');
+  if (value.profile !== undefined) requireProfileName(value.profile, 'meta.profile');
   if (value.phases !== undefined) {
     if (!Array.isArray(value.phases)) throw new Error('meta.phases must be an array');
     for (const phase of value.phases) {
@@ -425,6 +491,13 @@ function validateMeta(meta: unknown): asserts meta is WorkflowMeta {
       ) {
         throw new Error('each meta phase must have a title string');
       }
+      const metaPhase = phase as WorkflowMetaPhase & { model?: unknown };
+      if ('model' in metaPhase) throwProfileMigrationError('meta phase');
+      if (metaPhase.detail !== undefined && typeof metaPhase.detail !== 'string') {
+        throw new Error('each meta phase detail must be a string');
+      }
+      if (metaPhase.profile !== undefined)
+        requireProfileName(metaPhase.profile, 'meta phase profile');
     }
   }
 }
@@ -459,15 +532,49 @@ function optionalString(value: unknown, name: string): string | undefined {
 
 function normalizeAgentOptions(value: unknown): AgentOptions {
   if (!value || typeof value !== 'object') throw new TypeError('agent options must be an object');
-  const options = value as AgentOptions;
+  const options = value as AgentOptions & { model?: unknown };
+  if ('model' in options) throwProfileMigrationError('agent');
   return {
     ...options,
     label: optionalString(options.label, 'agent label'),
     phase: optionalString(options.phase, 'agent phase'),
-    model: optionalString(options.model, 'agent model'),
+    profile: optionalProfileName(options.profile, 'agent profile'),
     isolation: options.isolation,
     agentType: optionalString(options.agentType, 'agent type')
   };
+}
+
+function normalizePhaseOptions(value: unknown): { profile?: string } {
+  if (!value || typeof value !== 'object') throw new TypeError('phase options must be an object');
+  const options = value as { profile?: unknown; model?: unknown };
+  if ('model' in options) throwProfileMigrationError('phase');
+  return { profile: optionalProfileName(options.profile, 'phase profile') };
+}
+
+function optionalProfileName(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  return requireProfileName(value, name);
+}
+
+function requireProfileName(value: unknown, name: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+function throwProfileMigrationError(location: string): never {
+  throw new Error(
+    `${location} model selection was removed; select an approved named profile instead`
+  );
+}
+
+function resolveProfile(
+  name: string,
+  resolver: WorkflowProfileResolver | undefined
+): ResolvedWorkflowProfile {
+  if (!resolver) throw new WorkflowProfileRoutingError(name, 'profile routing is unavailable');
+  return resolver(name);
 }
 
 function assertStructuredCloneable(value: unknown, name: string): void {
@@ -493,7 +600,6 @@ function buildAgentInstructions(
   if (phase) lines.push(`Workflow phase: ${phase}`);
   if (options.agentType) lines.push(`Act as workflow subagent type: ${options.agentType}`);
   if (options.isolation) lines.push(`Requested isolation: ${options.isolation}`);
-  if (options.model) lines.push(`Requested model: ${options.model}`);
   return lines.length ? lines.join('\n') : undefined;
 }
 

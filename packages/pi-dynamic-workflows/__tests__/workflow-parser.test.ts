@@ -6,7 +6,8 @@ const validScript = `export const meta = {
   name: 'demo_workflow',
   description: 'A useful workflow',
   whenToUse: 'When testing parser behavior',
-  phases: [{ title: 'Scan', detail: 'Collect inputs', model: 'default' }]
+  profile: 'fast',
+  phases: [{ title: 'Scan', detail: 'Collect inputs', profile: 'thorough' }]
 }
 
 phase('Scan')
@@ -17,8 +18,9 @@ test('parseWorkflowScript accepts literal workflow metadata', () => {
   const parsed = parseWorkflowScript(validScript);
   assert.equal(parsed.meta.name, 'demo_workflow');
   assert.equal(parsed.meta.description, 'A useful workflow');
+  assert.equal(parsed.meta.profile, 'fast');
   assert.deepEqual(parsed.meta.phases, [
-    { title: 'Scan', detail: 'Collect inputs', model: 'default' }
+    { title: 'Scan', detail: 'Collect inputs', profile: 'thorough' }
   ]);
   assert.match(parsed.body, /phase\('Scan'\)/);
   assert.doesNotMatch(parsed.body, /export const meta/);
@@ -48,6 +50,28 @@ test('parseWorkflowScript requires name and description', () => {
   assert.throws(
     () => parseWorkflowScript("export const meta = { description: 'desc' }"),
     /meta.name/
+  );
+});
+
+test('parseWorkflowScript rejects invalid profiles and retired model metadata', () => {
+  assert.throws(
+    () =>
+      parseWorkflowScript("export const meta = { name: 'demo', description: 'desc', profile: 1 }"),
+    /meta.profile must be a non-empty string/
+  );
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', model: 'legacy' }"
+      ),
+    /meta model selection was removed.*approved named profile/
+  );
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [{ title: 'Scan', model: 'legacy' }] }"
+      ),
+    /meta phase model selection was removed.*approved named profile/
   );
 });
 
