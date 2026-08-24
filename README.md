@@ -19,7 +19,6 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
 | [i-have-adhd](./skills/i-have-adhd/) | Skill | Action-first, ADHD-friendly output shaping |
-| [pi-simple-subagent](./skills/pi-simple-subagent/) | Skill | Delegate a task to a detached background Pi sub-agent, then pull back only its final result |
 | [web-discovery](./skills/web-discovery/) | Skill | Browserless web search via local SearXNG + Defuddle |
 | [code-rot-cleaner](./skills/code-rot-cleaner/) | Skill | Consent-first dead-code discovery and disposable-copy removal proof |
 | [tokyonight](./themes/tokyonight.json) | Theme | Tokyo Night color theme |
