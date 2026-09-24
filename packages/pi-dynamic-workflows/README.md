@@ -75,6 +75,8 @@ return { inventory, summary }
 
 Phases are discovered as the script runs, so conditional and loop-created phases work naturally. If a branch is skipped, its phase does not show up as an empty progress row.
 
+Each `meta.phases` entry can also be a plain string as shorthand for `{ title: '...' }`, e.g. `phases: ['Scan', 'Analyze']`.
+
 ### Approved routing profiles
 
 Subagents inherit the active session model and thinking level by default. To allow controlled routing, configure an approved set at `~/.pi/agent/pi-dynamic-workflows/profiles.json`:

@@ -21,7 +21,7 @@ const workflowToolSchema = Type.Object({
   script: Type.String({
     description: [
       'Required raw JavaScript workflow script, with no Markdown fences.',
-      "First statement: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. meta.phases is optional documentation; live progress is driven by phase(title).",
+      "First statement: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. meta.phases is optional documentation (array of title strings or { title, detail?, profile? } objects); live progress is driven by phase(title).",
       "Use phase('Name'), agent(prompt, opts), parallel(arrayOfFunctions), pipeline(items, ...stages), log(message), args, and budget. The workflow must call agent() at least once.",
       'parallel() requires functions, not promises: await parallel(items.map(item => () => agent(...))).'
     ].join(' ')
@@ -69,7 +69,7 @@ export function createWorkflowTool(
     promptGuidelines: [
       'Use workflow only when the user explicitly asks for a workflow, workflows, fan-out, or multi-agent orchestration.',
       'For workflow, always pass one raw JavaScript string in the required script parameter; do not include Markdown fences or prose around the script.',
-      "For workflow, the script's first statement must be `export const meta = { name: 'short_snake_case', description: 'non-empty human description' }`; meta.name and meta.description are required non-empty strings, and meta.phases is optional metadata for a stable upfront outline.",
+      "For workflow, the script's first statement must be `export const meta = { name: 'short_snake_case', description: 'non-empty human description' }`; meta.name and meta.description are required non-empty strings, and meta.phases is optional metadata for a stable upfront outline (each entry is a title string or a { title, detail?, profile? } object).",
       'For workflow, write plain JavaScript after the meta export. Do not use TypeScript syntax, imports, require(), fs, Date.now(), Math.random(), or new Date().',
       'For workflow, available globals are agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args, cwd, process.cwd(), and budget. Every workflow must call agent() at least once; do not use workflow only to declare phases or return a static object.',
       'For workflow, call phase(title) when a new group of work starts. Phase names may be conditional or built in a loop; do not predeclare speculative phases just in case.',

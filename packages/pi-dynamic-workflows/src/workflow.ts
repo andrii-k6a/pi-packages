@@ -483,13 +483,22 @@ function validateMeta(meta: unknown): asserts meta is WorkflowMeta {
   if (value.profile !== undefined) requireProfileName(value.profile, 'meta.profile');
   if (value.phases !== undefined) {
     if (!Array.isArray(value.phases)) throw new Error('meta.phases must be an array');
-    for (const phase of value.phases) {
+    const rawPhases = value.phases as unknown[];
+    value.phases = rawPhases.map((phase): WorkflowMetaPhase => {
+      // Shorthand: a plain non-empty string is equivalent to `{ title: phase }`.
+      if (typeof phase === 'string') {
+        if (!phase.trim()) throw new Error('each meta phase title must be a non-empty string');
+        return { title: phase };
+      }
       if (
         !phase ||
         typeof phase !== 'object' ||
-        typeof (phase as WorkflowMetaPhase).title !== 'string'
+        typeof (phase as WorkflowMetaPhase).title !== 'string' ||
+        !(phase as WorkflowMetaPhase).title.trim()
       ) {
-        throw new Error('each meta phase must have a title string');
+        throw new Error(
+          'each meta phase must be a title string, or an object with a non-empty title string'
+        );
       }
       const metaPhase = phase as WorkflowMetaPhase & { model?: unknown };
       if ('model' in metaPhase) throwProfileMigrationError('meta phase');
@@ -498,7 +507,8 @@ function validateMeta(meta: unknown): asserts meta is WorkflowMeta {
       }
       if (metaPhase.profile !== undefined)
         requireProfileName(metaPhase.profile, 'meta phase profile');
-    }
+      return metaPhase;
+    });
   }
 }
 

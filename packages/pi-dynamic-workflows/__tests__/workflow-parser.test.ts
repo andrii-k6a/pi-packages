@@ -26,6 +26,84 @@ test('parseWorkflowScript accepts literal workflow metadata', () => {
   assert.doesNotMatch(parsed.body, /export const meta/);
 });
 
+test('parseWorkflowScript accepts plain-string phases as title shorthand', () => {
+  const parsed = parseWorkflowScript(
+    "export const meta = { name: 'demo', description: 'desc', phases: ['Scan', 'Analyze'] }"
+  );
+  assert.deepEqual(parsed.meta.phases, [{ title: 'Scan' }, { title: 'Analyze' }]);
+});
+
+test('parseWorkflowScript accepts a mix of string and object phases', () => {
+  const parsed = parseWorkflowScript(
+    "export const meta = { name: 'demo', description: 'desc', phases: ['Scan', { title: 'Review', detail: 'Check output' }] }"
+  );
+  assert.deepEqual(parsed.meta.phases, [
+    { title: 'Scan' },
+    { title: 'Review', detail: 'Check output' }
+  ]);
+});
+
+test('parseWorkflowScript rejects an empty-string phase', () => {
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [''] }"
+      ),
+    /each meta phase title must be a non-empty string/
+  );
+});
+
+test('parseWorkflowScript rejects a whitespace-only phase string', () => {
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: ['   '] }"
+      ),
+    /each meta phase title must be a non-empty string/
+  );
+});
+
+test('parseWorkflowScript rejects object-form phases with a blank title, for parity with the string shorthand', () => {
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [{ title: '' }] }"
+      ),
+    /each meta phase must be a title string, or an object with a non-empty title string/
+  );
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [{ title: '   ' }] }"
+      ),
+    /each meta phase must be a title string, or an object with a non-empty title string/
+  );
+});
+
+test('parseWorkflowScript rejects non-string, null, and nested-array phase entries', () => {
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [{ title: 5 }] }"
+      ),
+    /each meta phase must be a title string, or an object with a non-empty title string/
+  );
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [null] }"
+      ),
+    /each meta phase must be a title string, or an object with a non-empty title string/
+  );
+  assert.throws(
+    () =>
+      parseWorkflowScript(
+        "export const meta = { name: 'demo', description: 'desc', phases: [['Scan']] }"
+      ),
+    /each meta phase must be a title string, or an object with a non-empty title string/
+  );
+});
+
 test('parseWorkflowScript accepts static template literals', () => {
   const parsed = parseWorkflowScript(
     'export const meta = { name: `demo`, description: `static` }\nreturn true'

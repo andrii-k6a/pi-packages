@@ -40,6 +40,24 @@ return { scan }
   assert.equal((result.result as { scan: string }).scan, 'result:scan');
 });
 
+test('runWorkflow normalizes string-shorthand meta.phases in the returned meta', async () => {
+  const result = await runWorkflow(
+    `export const meta = {
+  name: 'shorthand_demo',
+  description: 'Use plain-string phases',
+  phases: ['Scan', 'Review']
+}
+
+phase('Scan')
+await agent('scan', { label: 'scan' })
+return { ok: true }
+`,
+    { agent: fakeAgent }
+  );
+
+  assert.deepEqual(result.meta.phases, [{ title: 'Scan' }, { title: 'Review' }]);
+});
+
 test('runWorkflow records loop-created phases without skipped conditional phases', async () => {
   const result = await runWorkflow(
     `export const meta = {

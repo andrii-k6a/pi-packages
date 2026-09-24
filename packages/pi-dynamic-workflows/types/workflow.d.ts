@@ -16,8 +16,8 @@ declare global {
     whenToUse?: string;
     /** Optional approved profile name for all subagents unless a runtime phase or agent overrides it. */
     profile?: string;
-    /** Optional documentation for an expected outline. Live progress is driven by `phase(...)`. */
-    phases?: WorkflowMetaPhase[];
+    /** Optional documentation for an expected outline. Live progress is driven by `phase(...)`. A plain string is shorthand for `{ title: string }`. */
+    phases?: Array<string | WorkflowMetaPhase>;
   }
 
   interface WorkflowMetaPhase {
