@@ -538,7 +538,7 @@ export function registerGoalExtension(pi: ExtensionAPI, options: GoalExtensionOp
   function startVerifierIfNeeded(ctx: ExtensionContext): void {
     const state = runtime.goal;
     const claim = state?.pendingClaim;
-    if (!state || state.status !== 'verifying' || !claim || runtime.verifierRunning) return;
+    if (state?.status !== 'verifying' || !claim || runtime.verifierRunning) return;
 
     const budget = getBudgetExhaustion(state, clock);
     if (budget) {

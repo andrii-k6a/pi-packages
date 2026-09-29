@@ -181,28 +181,28 @@ describe('normalizeQuestions', () => {
       }),
       /questions\[0\]\.options\[0\]\.preview is 4001 characters \(max 4000\)/
     ]
-  ])('accepts an exact maximum-length %s and rejects one character over', (_field, atMaximum, overMaximum, expected) => {
-    expect(() => normalizeQuestions(input([atMaximum]))).not.toThrow();
-    expect(() => normalizeQuestions(input([overMaximum]))).toThrow(expected);
-  });
+  ])(
+    'accepts an exact maximum-length %s and rejects one character over',
+    (_field, atMaximum, overMaximum, expected) => {
+      expect(() => normalizeQuestions(input([atMaximum]))).not.toThrow();
+      expect(() => normalizeQuestions(input([overMaximum]))).toThrow(expected);
+    }
+  );
 
-  it.each([
-    'Other',
-    'other',
-    'Type something.',
-    'type something',
-    'Something else'
-  ])('rejects the reserved label %s', (label) => {
-    const questions = [
-      question({
-        options: [
-          { label: 'Real choice', description: 'ok' },
-          { label, description: 'reserved' }
-        ]
-      })
-    ];
-    expect(() => normalizeQuestions(input(questions))).toThrow(/is reserved/);
-  });
+  it.each(['Other', 'other', 'Type something.', 'type something', 'Something else'])(
+    'rejects the reserved label %s',
+    (label) => {
+      const questions = [
+        question({
+          options: [
+            { label: 'Real choice', description: 'ok' },
+            { label, description: 'reserved' }
+          ]
+        })
+      ];
+      expect(() => normalizeQuestions(input(questions))).toThrow(/is reserved/);
+    }
+  );
 
   it('preserves a preview on a multiSelect question', () => {
     const result = normalizeQuestions(

@@ -24,7 +24,7 @@ function getLastAssistantText(ctx: {
     const entry = branch[i];
     if (entry?.type !== 'message') continue;
     const message = entry.message;
-    if (!message || message.role !== 'assistant') continue;
+    if (message?.role !== 'assistant') continue;
 
     const parts = Array.isArray(message.content)
       ? message.content

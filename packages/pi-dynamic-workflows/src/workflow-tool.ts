@@ -216,9 +216,10 @@ export function createWorkflowSessionOptions(
 function getModelRuntime(
   modelRegistry: unknown
 ): NonNullable<CreateAgentSessionOptions['modelRuntime']> {
-  // Pi 0.84.1 exposes the current runtime to extensions only through ModelRegistry's
-  // private backing field, while createAgentSession() now requires modelRuntime. Keep this
-  // compatibility shim narrow, validated, and loud until Pi exposes a public accessor.
+  // Pi exposes the parent ModelRegistry to extensions but no public accessor for its
+  // ModelRuntime (still true in 0.87.1), and createAgentSession() creates a separate runtime
+  // when modelRuntime is omitted, which would lose the parent's provider/auth configuration.
+  // Keep this compatibility shim narrow, validated, and loud until Pi exposes a public accessor.
   const runtime = (modelRegistry as { runtime?: unknown }).runtime;
   if (!isModelRuntime(runtime)) {
     throw new Error(

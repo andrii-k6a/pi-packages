@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { createWorkflowSessionOptions, createWorkflowTool } from '../src/workflow-tool.js';
 
-test('createWorkflowSessionOptions passes Pi 0.84 model runtime metadata to subagents', () => {
+test('createWorkflowSessionOptions forwards the parent model runtime and selection to subagents', () => {
   const runtime = {
     getAuth() {},
     getModel() {},

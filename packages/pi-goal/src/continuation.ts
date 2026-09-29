@@ -38,7 +38,7 @@ export type DispatchResult =
 
 export function maybeDispatchContinuation(input: DispatchContinuationInput): DispatchResult {
   const state = input.runtime.goal;
-  if (!state || state.status !== 'active') return 'not_active';
+  if (state?.status !== 'active') return 'not_active';
   if (input.runtime.continuationDispatch) return 'already_queued';
 
   const branch = input.ctx.sessionManager.getBranch();
@@ -149,7 +149,7 @@ export function filterStaleContinuationMessages(
 ): AgentMessage[] {
   return messages.filter((message) => {
     if (!isGoalContinuationMessage(message)) return true;
-    if (!state || state.status !== 'active') return false;
+    if (state?.status !== 'active') return false;
     const details = asRecord((message as unknown as Record<string, unknown>).details);
     return details.goal_id === state.id && details.generation === state.generation;
   });
