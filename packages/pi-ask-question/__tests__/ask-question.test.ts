@@ -1,6 +1,6 @@
 import type {
   ExtensionAPI,
-  ExtensionContext,
+  ExtensionToolContext,
   Theme,
   ToolDefinition
 } from '@earendil-works/pi-coding-agent';
@@ -56,7 +56,7 @@ function tuiHarness() {
           component = factory(tui, plainTheme as unknown as Theme, {}, resolve);
         })
     }
-  } as unknown as ExtensionContext;
+  } as unknown as ExtensionToolContext;
 
   return {
     ctx,
@@ -120,6 +120,7 @@ describe('registration', () => {
     expect(tool.name).toBe('ask_user_question');
     expect(tool.label).toBe('Ask User Question');
     expect(tool.executionMode).toBe('sequential');
+    expect(tool.exposure).toBe('model-only');
     expect(tool.promptSnippet).toBeTruthy();
     expect(tool.promptGuidelines?.length).toBeGreaterThan(0);
     for (const guideline of tool.promptGuidelines ?? []) {
@@ -139,7 +140,7 @@ describe('registration', () => {
 describe('execute guards', () => {
   it('reports that no UI is available outside TUI mode', async () => {
     const tool = loadTool();
-    const ctx = { mode: 'print' } as unknown as ExtensionContext;
+    const ctx = { mode: 'print' } as unknown as ExtensionToolContext;
 
     const result = await tool.execute('call-1', singleQuestion(), undefined, undefined, ctx);
 

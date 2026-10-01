@@ -46,6 +46,8 @@ export default function askQuestion(pi: ExtensionAPI): void {
     parameters: AskUserQuestionParams,
     // Takes over the editor, so it must not run alongside other tool calls.
     executionMode: 'sequential',
+    // Asks the user, so only the model may call it, never codemode scripts via ctx.executeTool().
+    exposure: 'model-only',
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const questions = normalizeQuestions(params);

@@ -84,6 +84,9 @@ export function createWorkflowTool(
       ...profileGuidelines
     ],
     parameters: workflowToolSchema,
+    // Orchestrates subagents and streams progress, so only the model may call it, never
+    // codemode scripts via ctx.executeTool().
+    exposure: 'model-only',
     prepareArguments(args) {
       return normalizeWorkflowToolArgs(args);
     },
@@ -217,7 +220,7 @@ function getModelRuntime(
   modelRegistry: unknown
 ): NonNullable<CreateAgentSessionOptions['modelRuntime']> {
   // Pi exposes the parent ModelRegistry to extensions but no public accessor for its
-  // ModelRuntime (still true in 0.87.1), and createAgentSession() creates a separate runtime
+  // ModelRuntime (verified through 0.99.2), and createAgentSession() creates a separate runtime
   // when modelRuntime is omitted, which would lose the parent's provider/auth configuration.
   // Keep this compatibility shim narrow, validated, and loud until Pi exposes a public accessor.
   const runtime = (modelRegistry as { runtime?: unknown }).runtime;

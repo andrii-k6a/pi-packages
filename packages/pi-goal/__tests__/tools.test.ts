@@ -270,6 +270,8 @@ describe('goal tools and terminal batch guard', () => {
       { sessionManager: { getBranch: () => [] } }
     );
 
+    assert.equal(registered.pi_goal_claim_done.exposure, 'model-only');
+    assert.equal(registered.pi_goal_blocked.exposure, 'model-only');
     assert.equal(state.status, 'verifying');
     assert.equal(result.terminate, true);
     assert.equal(result.details.claim?.claim_id, 'claim');
@@ -279,6 +281,7 @@ describe('goal tools and terminal batch guard', () => {
 
 interface RegisteredTool {
   name: string;
+  exposure?: string;
   execute(
     toolCallId: string,
     params: Record<string, unknown>,

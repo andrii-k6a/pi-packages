@@ -49,6 +49,8 @@ export function registerGoalTools(pi: ExtensionAPI, env: GoalToolEnvironment): v
     ],
     parameters: ClaimDoneParams,
     executionMode: 'sequential',
+    // Nested calls bypass the terminal batch guard and `terminate`, so only the model may call it.
+    exposure: 'model-only',
     async execute(_toolCallId, params: ClaimDoneInput, _signal, _onUpdate, ctx) {
       const current = getCurrentActiveGoal(env.getGoal(), params);
       const { state, claim } = claimGoalDone(current, env.clock, env.ids, params);
@@ -77,6 +79,8 @@ export function registerGoalTools(pi: ExtensionAPI, env: GoalToolEnvironment): v
     ],
     parameters: BlockedParams,
     executionMode: 'sequential',
+    // Nested calls bypass the terminal batch guard and `terminate`, so only the model may call it.
+    exposure: 'model-only',
     async execute(_toolCallId, params: BlockedInput, _signal, _onUpdate, ctx) {
       const current = getCurrentActiveGoal(env.getGoal(), params);
       const state = blockGoal(current, env.clock, params.reason, params.evidence);

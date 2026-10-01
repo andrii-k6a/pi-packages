@@ -58,6 +58,10 @@ test('createWorkflowTool describes phases as optional and dynamic', () => {
   );
 });
 
+test('createWorkflowTool is model-only so codemode scripts cannot call it', () => {
+  assert.equal(createWorkflowTool().exposure, 'model-only');
+});
+
 test('createWorkflowTool omits profile guidance when no profiles are configured', () => {
   const guidance = createWorkflowTool().promptGuidelines?.join('\n') ?? '';
 
