@@ -220,7 +220,7 @@ function getModelRuntime(
   modelRegistry: unknown
 ): NonNullable<CreateAgentSessionOptions['modelRuntime']> {
   // Pi exposes the parent ModelRegistry to extensions but no public accessor for its
-  // ModelRuntime (verified through 0.99.2), and createAgentSession() creates a separate runtime
+  // ModelRuntime (verified through 1.0.0), and createAgentSession() creates a separate runtime
   // when modelRuntime is omitted, which would lose the parent's provider/auth configuration.
   // Keep this compatibility shim narrow, validated, and loud until Pi exposes a public accessor.
   const runtime = (modelRegistry as { runtime?: unknown }).runtime;
