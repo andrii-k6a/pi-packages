@@ -11,7 +11,7 @@ Inspired by Anthropic's [dynamic workflows in Claude Code](https://claude.com/bl
 ## Install
 
 ```bash
-pi install npm:pi-dynamic-workflows
+pi install npm:@andrii-k6a/pi-dynamic-workflows
 # or from a local checkout
 pi install /path/to/pi-dynamic-workflows
 ```
@@ -22,7 +22,7 @@ Then in Pi:
 /reload
 ```
 
-That's it. The extension registers a `workflow` tool and activates it on session start.
+That's it. The extension registers an active `workflow` tool when it loads.
 
 ## Usage
 
@@ -137,7 +137,7 @@ This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, an
 | `log(message)` | Append a workflow-level log line. |
 | `args` | Optional JSON value passed in via the tool's `args` parameter. |
 | `cwd`, `process.cwd()` | Current working directory for subagents. |
-| `budget` | `{ total, spent(), remaining() }` token budget tracker. |
+| `budget` | `{ total, spent(), remaining() }` tracker. `spent()` counts tokens reported by subagents (estimating successful runs only when no usage is reported); `remaining()` subtracts that spend from the optional budget. |
 
 ### Determinism rules
 
@@ -168,7 +168,7 @@ const finding = await agent('Find security-sensitive files.', {
 })
 ```
 
-Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
+Under the hood this is a model-only Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
 
 ## How it works
 
@@ -182,7 +182,7 @@ user prompt
   → final structured result returned to the parent assistant
 ```
 
-Subagents run in fresh in-memory Pi sessions with the standard coding tools, so they can read files, run shell commands, and call structured output exactly like a normal Pi turn.
+Subagents run in fresh in-memory Pi sessions with standard coding tools, so they can read files, run shell commands, and call model-only `structured_output` when requested. If `codemode` is active in the parent session, subagents inherit it; built-in MCP and `tool_search` are not loaded in subagents. The `workflow` tool is unavailable inside subagents, so they cannot start nested workflows. Subagent token usage and cost are added to the parent session totals for completed workflows (including usage from failed subagents within a completed workflow).
 
 ## Library modules
 
@@ -194,17 +194,26 @@ Subagents run in fresh in-memory Pi sessions with the standard coding tools, so 
 | `src/profiles.ts` | User-owned approved profile loading and provider-aware routing. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
-| `extensions/workflow.ts` | The Pi extension entrypoint. |
+| `src/usage.ts` | Subagent token usage and cost aggregation. |
+| `src/dynamic-workflows.ts` | The Pi extension entrypoint. |
 
 ## Development
 
+From the repository root:
+
 ```bash
 npm install
-npm test     # biome check + tsc + unit tests
-npm run dev
+npm run test
+npm run check
 ```
 
-Parser unit tests live in `tests/workflow-parser.test.ts` and cover both accepted and rejected script shapes.
+To try the local extension:
+
+```bash
+cd packages/pi-dynamic-workflows && pi -e .
+```
+
+Vitest tests live in `packages/pi-dynamic-workflows/__tests__/`.
 
 ## Status
 

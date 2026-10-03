@@ -61,8 +61,11 @@ declare global {
   }
 
   interface WorkflowBudget {
+    /** Optional total token limit; null means no limit. */
     total: number | null;
+    /** Tokens reported by subagents; successful runs with no usage report use an estimate. */
     spent(): number;
+    /** Total minus spent(), floored at zero; Infinity when there is no limit. */
     remaining(): number;
   }
 
@@ -93,6 +96,6 @@ declare global {
   /** Deterministic process shim exposing only cwd(). */
   const process: { cwd(): string };
 
-  /** Simple token-budget estimate for workflow runs. */
+  /** Token budget tracker using reported subagent usage when available. */
   const budget: WorkflowBudget;
 }

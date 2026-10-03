@@ -1,4 +1,5 @@
 import vm from 'node:vm';
+import type { Usage } from '@earendil-works/pi-ai';
 import type { Node } from 'acorn';
 import { parse } from 'acorn';
 import type { TSchema } from 'typebox';
@@ -8,6 +9,7 @@ import {
   type WorkflowProfileResolver,
   WorkflowProfileRoutingError
 } from './profiles.js';
+import { addUsage, emptyUsage, hasUsage } from './usage.js';
 
 export interface WorkflowMetaPhase {
   title: string;
@@ -48,6 +50,7 @@ export interface WorkflowRunResult<T = unknown> {
   phases: string[];
   agentCount: number;
   durationMs: number;
+  usage: Usage;
 }
 
 export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema | undefined> {
@@ -68,6 +71,7 @@ interface RuntimeState {
   phases: string[];
   agentCount: number;
   spent: number;
+  usage: Usage;
 }
 
 // Acorn's base Node type is intentionally broad; parser-specific fields are
@@ -94,7 +98,8 @@ export async function runWorkflow<T = unknown>(
     logs: [],
     phases: [],
     agentCount: 0,
-    spent: 0
+    spent: 0,
+    usage: emptyUsage()
   };
   const agentRunner = options.agent ?? new WorkflowAgent(options);
   const concurrency = Math.max(
@@ -183,6 +188,7 @@ export async function runWorkflow<T = unknown>(
         profile: profileName,
         prompt: taskPrompt
       });
+      let reportedUsage = false;
       try {
         throwIfAborted();
         const result = await agentRunner.run(taskPrompt, {
@@ -190,10 +196,17 @@ export async function runWorkflow<T = unknown>(
           schema: normalizedOptions.schema,
           signal: options.signal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
-          sessionOverride: profile
+          sessionOverride: profile,
+          onUsage(usage) {
+            // Providers without usage reporting yield zeros; keep the estimate fallback for them.
+            if (hasUsage(usage)) reportedUsage = true;
+            const previousTokens = state.usage.totalTokens;
+            state.usage = addUsage(state.usage, usage);
+            state.spent += state.usage.totalTokens - previousTokens;
+          }
         });
         throwIfAborted();
-        state.spent += estimateTokens(result);
+        if (!reportedUsage) state.spent += estimateTokens(result);
         options.onAgentEnd?.({ label, phase: assignedPhase, result });
         return result;
       } catch (error) {
@@ -304,7 +317,8 @@ export async function runWorkflow<T = unknown>(
     logs: state.logs,
     phases: state.phases,
     agentCount: state.agentCount,
-    durationMs: Date.now() - started
+    durationMs: Date.now() - started,
+    usage: state.usage
   };
 }
 

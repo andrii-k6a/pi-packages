@@ -4,7 +4,10 @@ import { loadWorkflowProfiles } from './profiles.js';
 import { createWorkflowTool } from './workflow-tool.js';
 
 export default function extension(pi: ExtensionAPI) {
-  const workflowTool = createWorkflowTool({ profiles: loadWorkflowProfiles() });
+  const workflowTool = createWorkflowTool({
+    profiles: loadWorkflowProfiles(),
+    getActiveTools: () => pi.getActiveTools()
+  });
   pi.registerTool(workflowTool);
   pi.registerCommand('workflow-profiles', {
     description: 'Create, edit, delete, and reload approved workflow routing profiles',
@@ -54,6 +57,7 @@ export {
 } from './profiles.js';
 export type { StructuredOutputCapture, StructuredOutputToolOptions } from './structured-output.js';
 export { createStructuredOutputTool } from './structured-output.js';
+export { addUsage, emptyUsage, hasUsage, sumMessageUsage, sumSessionUsage } from './usage.js';
 export type {
   AgentOptions,
   WorkflowMeta,

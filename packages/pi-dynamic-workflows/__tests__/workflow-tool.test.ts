@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { createWorkflowSessionOptions, createWorkflowTool } from '../src/workflow-tool.js';
+import {
+  createWorkflowSessionOptions,
+  createWorkflowTool,
+  inheritsCodemode
+} from '../src/workflow-tool.js';
+
+test('workflow inherits codemode only when the parent exposes it as active', () => {
+  assert.equal(inheritsCodemode(), false);
+  assert.equal(
+    inheritsCodemode(() => ['read', 'workflow']),
+    false
+  );
+  assert.equal(
+    inheritsCodemode(() => ['read', 'codemode']),
+    true
+  );
+});
 
 test('createWorkflowSessionOptions forwards the parent model runtime and selection to subagents', () => {
   const runtime = {
@@ -56,6 +72,26 @@ test('createWorkflowTool describes phases as optional and dynamic', () => {
       line.includes('Phase names may be conditional or built in a loop')
     )
   );
+});
+
+test('createWorkflowTool keeps essential guidance while avoiding repeated schema instructions', () => {
+  const tool = createWorkflowTool();
+  const guidance = tool.promptGuidelines?.join('\n') ?? '';
+
+  assert.ok(guidance.length <= 2000);
+  const scriptDescription = tool.parameters.properties.script as { description?: string };
+  assert.ok((scriptDescription.description ?? '').length < 200);
+  assert.ok(scriptDescription.description?.includes("meta = { name: '...', description: '...' }"));
+  assert.match(guidance, /only when the user explicitly asks/);
+  assert.match(guidance, /First statement: `export const meta =/);
+  assert.match(guidance, /Date\.now\(\).*Math\.random\(\)/);
+  assert.ok(
+    guidance.includes("await parallel(items.map(item => () => agent('...', { label: '...' })))")
+  );
+  assert.ok(guidance.includes('await parallel(items.map(item => agent(...)))'));
+  assert.match(guidance, /check for nulls/i);
+  assert.match(guidance, /plain JSON Schema via opts\.schema/);
+  assert.match(guidance, /Subagents cannot start workflows themselves/);
 });
 
 test('createWorkflowTool is model-only so codemode scripts cannot call it', () => {

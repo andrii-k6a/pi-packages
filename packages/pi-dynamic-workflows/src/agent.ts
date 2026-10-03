@@ -1,8 +1,10 @@
-import type { AssistantMessage, TextContent } from '@earendil-works/pi-ai';
+import type { AssistantMessage, TextContent, Usage } from '@earendil-works/pi-ai';
 import {
   type CreateAgentSessionOptions,
   createAgentSession,
+  createCodemodeExtension,
   createCodingTools,
+  DefaultResourceLoader,
   getAgentDir,
   SessionManager,
   SettingsManager,
@@ -10,6 +12,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { Static, TSchema } from 'typebox';
 import { createStructuredOutputTool, type StructuredOutputCapture } from './structured-output.js';
+import { sumSessionUsage } from './usage.js';
 
 export interface WorkflowAgentOptions {
   cwd?: string;
@@ -17,6 +20,8 @@ export interface WorkflowAgentOptions {
   tools?: ToolDefinition[];
   /** Override any createAgentSession option (model, modelRuntime, resourceLoader, etc.). */
   session?: Partial<CreateAgentSessionOptions>;
+  /** Inherit the parent session's active codemode tool (default: false). */
+  codemode?: boolean;
   /** Extra system guidance prepended to every subagent task. */
   instructions?: string;
 }
@@ -27,6 +32,7 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   tools?: ToolDefinition[];
   instructions?: string;
   signal?: AbortSignal;
+  onUsage?: (usage: Usage) => void;
 }
 
 interface InternalAgentRunOptions {
@@ -41,12 +47,14 @@ export class WorkflowAgent {
   private readonly cwd: string;
   private readonly baseTools: ToolDefinition[];
   private readonly sessionOptions: Partial<CreateAgentSessionOptions>;
+  private readonly codemode: boolean;
   private readonly instructions?: string;
 
   constructor(options: WorkflowAgentOptions = {}) {
-    this.cwd = options.cwd ?? process.cwd();
+    this.cwd = options.session?.cwd ?? options.cwd ?? process.cwd();
     this.baseTools = options.tools ?? createCodingTools(this.cwd);
     this.sessionOptions = options.session ?? {};
+    this.codemode = options.codemode ?? false;
     this.instructions = options.instructions;
   }
 
@@ -66,19 +74,45 @@ export class WorkflowAgent {
       );
     }
 
-    const agentDir = getAgentDir();
+    const agentDir = this.sessionOptions.agentDir ?? getAgentDir();
+    const settingsManager =
+      this.sessionOptions.settingsManager ?? SettingsManager.create(this.cwd, agentDir);
+    let resourceLoader = this.sessionOptions.resourceLoader;
+    if (this.codemode && !resourceLoader) {
+      resourceLoader = new DefaultResourceLoader({
+        cwd: this.cwd,
+        agentDir,
+        settingsManager,
+        extensionFactories: [
+          { name: 'codemode', factory: createCodemodeExtension(), replaceable: true }
+        ]
+      });
+      await resourceLoader.reload();
+    }
     const { session } = await createAgentSession({
       cwd: this.cwd,
       agentDir,
       sessionManager: SessionManager.inMemory(this.cwd),
-      settingsManager: SettingsManager.create(this.cwd, agentDir),
+      settingsManager,
       customTools,
       ...this.sessionOptions,
-      ...options.sessionOverride
+      ...options.sessionOverride,
+      ...(resourceLoader ? { resourceLoader } : {}),
+      excludeTools: [...new Set(['workflow', ...(this.sessionOptions.excludeTools ?? [])])]
     });
+    const usageStartIndex = session.sessionManager.getEntries().length;
 
     let removeAbortListener: (() => void) | undefined;
     try {
+      if (this.codemode) {
+        const active = session.getActiveToolNames();
+        if (
+          session.getAllTools().some((tool) => tool.name === 'codemode') &&
+          !active.includes('codemode')
+        ) {
+          session.setActiveToolsByName([...active, 'codemode']);
+        }
+      }
       if (options.signal?.aborted) throw new Error('Subagent was aborted');
       if (options.signal) {
         const onAbort = () => void session.abort();
@@ -98,8 +132,16 @@ export class WorkflowAgent {
 
       return this.lastAssistantText(session.messages) as AgentRunResult<TSchemaDef>;
     } finally {
-      removeAbortListener?.();
-      session.dispose();
+      try {
+        // Use complete entries because live context can omit billed work after compaction or
+        // context edits, but exclude history that predates this run when sessions are reused.
+        options.onUsage?.(
+          sumSessionUsage(session.sessionManager.getEntries().slice(usageStartIndex))
+        );
+      } finally {
+        removeAbortListener?.();
+        session.dispose();
+      }
     }
   }
 

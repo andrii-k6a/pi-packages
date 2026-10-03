@@ -34,6 +34,9 @@ export function createStructuredOutputTool<TSchemaDef extends TSchema>({
       `Do not write a prose final answer after calling ${name}.`
     ],
     parameters: schema,
+    // The subagent model must call this directly: scripts cannot terminate a subagent run,
+    // and codemode.mode: "only" hides direct tools from the model.
+    exposure: 'model-only',
     async execute(_toolCallId, params) {
       capture.value = params;
       capture.called = true;

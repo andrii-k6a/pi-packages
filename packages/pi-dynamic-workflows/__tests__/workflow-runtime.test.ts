@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import type { Usage } from '@earendil-works/pi-ai';
 import { test } from 'vitest';
 import type { WorkflowAgent } from '../src/agent.js';
 import { type ResolvedWorkflowProfile, WorkflowProfileRoutingError } from '../src/profiles.js';
+import { emptyUsage } from '../src/usage.js';
 import { runWorkflow } from '../src/workflow.js';
 
 const fakeAgent: Pick<WorkflowAgent, 'run'> = {
@@ -38,6 +40,81 @@ return { scan }
   assert.deepEqual(result.phases, ['Scan']);
   assert.equal(result.agentCount, 1);
   assert.equal((result.result as { scan: string }).scan, 'result:scan');
+  assert.deepEqual(result.usage, emptyUsage());
+});
+
+test('runWorkflow aggregates parallel successes and failed agents, including their spent tokens', async () => {
+  const agent: Pick<WorkflowAgent, 'run'> = {
+    async run(prompt, options): Promise<never> {
+      const tokens = prompt === 'fail' ? 30 : prompt === 'first' ? 10 : 20;
+      const usage: Usage = {
+        ...emptyUsage(),
+        input: tokens - 1,
+        output: 1,
+        totalTokens: tokens,
+        cost: { ...emptyUsage().cost, total: tokens / 100 }
+      };
+      options?.onUsage?.(usage);
+      if (prompt === 'fail') throw new Error('spent before failure');
+      return `result:${prompt}` as never;
+    }
+  };
+  const result = await runWorkflow(
+    `export const meta = { name: 'usage', description: 'Account for all agents' }
+const results = await parallel(['first', 'fail', 'third'].map(name => () => agent(name)))
+return { results, spent: budget.spent() }
+`,
+    { agent }
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result.result)), {
+    results: ['result:first', null, 'result:third'],
+    spent: 60
+  });
+  assert.equal(result.usage.totalTokens, 60);
+  assert.equal(result.usage.input, 57);
+  assert.equal(result.usage.output, 3);
+  assert.ok(Math.abs(result.usage.cost.total - 0.6) < 1e-12);
+  assert.equal(result.logs.length, 1);
+  assert.match(result.logs[0], /spent before failure/);
+});
+
+test('budget.spent uses reported tokens and estimates only successful runs without reported usage', async () => {
+  const agent: Pick<WorkflowAgent, 'run'> = {
+    async run(prompt, options): Promise<never> {
+      if (prompt === 'reported') {
+        options?.onUsage?.({ ...emptyUsage(), totalTokens: 40 });
+        return 'a long result that would have a different token estimate' as never;
+      }
+      if (prompt === 'zero') {
+        options?.onUsage?.(emptyUsage());
+        return '123456' as never; // Zero usage means none reported: JSON length 8 -> 2 tokens.
+      }
+      if (prompt === 'failed') throw new Error('no reported usage');
+      return '12345678' as never; // JSON string length 10 -> estimated as 3 tokens.
+    }
+  };
+  const result = await runWorkflow(
+    `export const meta = { name: 'budget', description: 'Track actual tokens' }
+await agent('reported')
+const afterReported = budget.spent()
+await agent('zero')
+const afterZero = budget.spent()
+await agent('failed')
+const afterFailure = budget.spent()
+await agent('fallback')
+return { afterReported, afterZero, afterFailure, total: budget.spent() }
+`,
+    { agent }
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result.result)), {
+    afterReported: 40,
+    afterZero: 42,
+    afterFailure: 42,
+    total: 45
+  });
+  assert.deepEqual(result.usage, { ...emptyUsage(), totalTokens: 40 });
 });
 
 test('runWorkflow normalizes string-shorthand meta.phases in the returned meta', async () => {

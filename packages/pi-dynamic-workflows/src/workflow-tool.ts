@@ -15,16 +15,13 @@ import {
   type WorkflowSnapshot
 } from './display.js';
 import { createWorkflowProfileResolver, type WorkflowProfile } from './profiles.js';
+import { hasUsage } from './usage.js';
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from './workflow.js';
 
 const workflowToolSchema = Type.Object({
   script: Type.String({
-    description: [
-      'Required raw JavaScript workflow script, with no Markdown fences.',
-      "First statement: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. meta.phases is optional documentation (array of title strings or { title, detail?, profile? } objects); live progress is driven by phase(title).",
-      "Use phase('Name'), agent(prompt, opts), parallel(arrayOfFunctions), pipeline(items, ...stages), log(message), args, and budget. The workflow must call agent() at least once.",
-      'parallel() requires functions, not promises: await parallel(items.map(item => () => agent(...))).'
-    ].join(' ')
+    description:
+      "Raw JavaScript, no Markdown fences; start with export const meta = { name: '...', description: '...' }."
   }),
   args: Type.Optional(
     Type.Any({
@@ -50,6 +47,11 @@ export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
   profiles?: readonly WorkflowProfile[];
+  getActiveTools?: () => readonly string[];
+}
+
+export function inheritsCodemode(getActiveTools?: () => readonly string[]): boolean {
+  return getActiveTools?.().includes('codemode') ?? false;
 }
 
 export function createWorkflowTool(
@@ -60,27 +62,20 @@ export function createWorkflowTool(
   return defineTool({
     name: 'workflow',
     label: 'Workflow',
-    description: [
-      'Execute a deterministic JavaScript workflow that orchestrates multiple subagents with agent(), parallel(), and pipeline().',
-      'script is required raw JavaScript. It must start with export const meta = { name, description } and must call agent() at least once; phases are optional metadata.'
-    ].join(' '),
+    description:
+      'Run deterministic JavaScript workflows that orchestrate isolated subagents with agent(), parallel(), and pipeline().',
     promptSnippet:
-      "Run a deterministic JavaScript workflow. Required script header: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. Use phase(title) at runtime to create progress groups.",
+      "Run a workflow. Required header: export const meta = { name: 'short_snake_case', description: 'non-empty description' }; call phase(title) for live progress.",
     promptGuidelines: [
-      'Use workflow only when the user explicitly asks for a workflow, workflows, fan-out, or multi-agent orchestration.',
-      'For workflow, always pass one raw JavaScript string in the required script parameter; do not include Markdown fences or prose around the script.',
-      "For workflow, the script's first statement must be `export const meta = { name: 'short_snake_case', description: 'non-empty human description' }`; meta.name and meta.description are required non-empty strings, and meta.phases is optional metadata for a stable upfront outline (each entry is a title string or a { title, detail?, profile? } object).",
-      'For workflow, write plain JavaScript after the meta export. Do not use TypeScript syntax, imports, require(), fs, Date.now(), Math.random(), or new Date().',
-      'For workflow, available globals are agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args, cwd, process.cwd(), and budget. Every workflow must call agent() at least once; do not use workflow only to declare phases or return a static object.',
-      'For workflow, call phase(title) when a new group of work starts. Phase names may be conditional or built in a loop; do not predeclare speculative phases just in case.',
-      'For workflow, prefer it for decomposable work: repository inspection, independent research/checks, multi-perspective review, or fan-out/fan-in synthesis. Do not use it for a single quick file read/edit or when ordinary tools are enough.',
-      "For workflow, parallel() takes functions, not promises: use `await parallel(items.map(item => () => agent('...', { label: '...' })))`, never `await parallel(items.map(item => agent(...)))`. Results are returned in input order.",
-      'For workflow, pipeline(items, ...stages) runs each item through stages sequentially, while different items may run concurrently. Each stage receives (previousValue, originalItem, index).',
-      "For workflow, every agent() call should include a unique short label option, 2-5 words, such as { label: 'repo inventory' } or { label: 'source modules' }; unique labels make live status and error reporting readable.",
-      'For workflow, failed agent(), parallel(), or pipeline() branches return null and log the failure unless the workflow is aborted. Check for nulls before synthesizing conclusions.',
-      'For workflow, include a final synthesis/assertion agent when combining multiple subagent results; return a compact JSON-serializable value with ok/verdict plus the important outputs.',
-      'For workflow, if agent() needs machine-readable output, pass a plain JSON Schema via opts.schema; agent() will return the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.',
-      'For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.',
+      'Use workflow only when the user explicitly asks for a workflow, fan-out, or multi-agent orchestration; suits decomposable work (repo inspection, independent research/checks, multi-perspective review, fan-out/fan-in synthesis), not a quick read/edit or when ordinary tools suffice.',
+      "For workflow, script takes one raw JavaScript string (no Markdown fences/prose). First statement: `export const meta = { name: 'short_snake_case', description: '...' }` (both non-empty); meta.phases is optional metadata (title strings or { title, detail?, profile? } outline).",
+      'For workflow, phase(title) starts live progress groups. Phase names may be conditional or built in a loop; do not predeclare speculative phases.',
+      'For workflow, use plain JavaScript: no TypeScript syntax, imports, require(), fs, Date.now(), Math.random(), new Date(). Globals: agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args, cwd, process.cwd(), budget. Call agent() at least once.',
+      "For workflow, parallel() takes functions, not promises: `await parallel(items.map(item => () => agent('...', { label: '...' })))`, never `await parallel(items.map(item => agent(...)))`; results in input order.",
+      "For workflow, pipeline(items, ...stages) runs each item's stages sequentially, items concurrently; stage args: (previousValue, originalItem, index).",
+      'For workflow, label every agent() uniquely (2-5 words); subagents lack parent context—include task context and relevant paths in prompts. Subagents cannot start workflows themselves.',
+      'For workflow, failed agent()/parallel()/pipeline() branches return null and log failure unless aborted; check for nulls before synthesis. Use a final synthesis/assertion agent to combine results; return compact JSON-serializable value with ok/verdict and important outputs.',
+      'For workflow, pass plain JSON Schema via opts.schema for machine-readable agent() output; agent() returns the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.',
       ...profileGuidelines
     ],
     parameters: workflowToolSchema,
@@ -113,6 +108,7 @@ export function createWorkflowTool(
           args: params.args,
           signal,
           concurrency: options.concurrency,
+          codemode: inheritsCodemode(options.getActiveTools),
           session: createWorkflowSessionOptions(ctx),
           profileResolver: createWorkflowProfileResolver(options.profiles ?? [], ctx),
           onLog(message) {
@@ -174,7 +170,9 @@ export function createWorkflowTool(
       snapshot = recomputeWorkflowSnapshot(snapshot);
       display.complete(snapshot);
 
+      // Aborted or failed workflows still throw, so their usage cannot be reported here.
       return {
+        ...(hasUsage(result.usage) ? { usage: result.usage } : {}),
         content: [
           {
             type: 'text',
@@ -187,7 +185,8 @@ export function createWorkflowTool(
           phases: result.phases,
           logs: result.logs,
           result: result.result,
-          durationMs: result.durationMs
+          durationMs: result.durationMs,
+          usage: result.usage
         }
       };
     },
