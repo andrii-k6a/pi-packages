@@ -15,11 +15,9 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current Pi session into a new tmux pane (`/tmux-branch-*`) |
 | [@andrii-k6a/pi-dynamic-workflows](./packages/pi-dynamic-workflows/) | Extension | Claude-Code-style dynamic workflows — fan work out across isolated subagents via a `workflow` tool |
 | [@andrii-k6a/pi-ask-question](./packages/pi-ask-question/) | Extension | Ask up to four multiple-choice questions in a terminal dialog and return structured answers (`ask_user_question`) |
-| [agent-browser](./skills/agent-browser/) | Skill | Browser automation via `agent-browser` CLI |
+| [@andrii-k6a/pi-caffeinate](./packages/pi-caffeinate/) | Extension | Keep the computer awake while an agent run is active |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
-| [i-have-adhd](./skills/i-have-adhd/) | Skill | Action-first, ADHD-friendly output shaping |
 | [web-discovery](./skills/web-discovery/) | Skill | Browserless web search via local SearXNG + Defuddle |
-| [code-rot-cleaner](./skills/code-rot-cleaner/) | Skill | Consent-first dead-code discovery and disposable-copy removal proof |
 | [tokyonight](./themes/tokyonight.json) | Theme | Tokyo Night color theme |
 
 Each package has its own README with setup instructions, usage, and configuration details.
