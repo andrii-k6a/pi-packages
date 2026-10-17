@@ -17,10 +17,12 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-ask-question](./packages/pi-ask-question/) | Extension | Ask up to four multiple-choice questions in a terminal dialog and return structured answers (`ask_user_question`) |
 | [@andrii-k6a/pi-caffeinate](./packages/pi-caffeinate/) | Extension | Keep the computer awake while an agent run is active |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |
-| [web-discovery](./skills/web-discovery/) | Skill | Browserless web search via local SearXNG + Defuddle |
+| [searxng](./skills/searxng/) | Skill | Discover sources through local SearXNG search |
+| [defuddle](./skills/defuddle/) | Skill | Read static web pages as clean Markdown |
+| [crawl4ai](./skills/crawl4ai/) | Skill | Read rendered pages and crawl sites with a local browser |
 | [tokyonight](./themes/tokyonight.json) | Theme | Tokyo Night color theme |
 
-Each package has its own README with setup instructions, usage, and configuration details.
+Each extension has its own README with setup instructions, usage, and configuration details. Skills document their usage in `SKILL.md`.
 
 ## Install All
 
