@@ -29,10 +29,10 @@ describe('parseConfig', () => {
   it('returns default shortcuts when settings is undefined', () => {
     const config = parseConfig(undefined);
     expect(config.shortcuts).toMatchObject({
-      right: 'ctrl+shift+l',
-      left: 'ctrl+shift+h',
-      down: 'ctrl+shift+j',
-      up: 'ctrl+shift+k'
+      right: 'ctrl+alt+shift+l',
+      left: 'ctrl+alt+shift+h',
+      down: 'ctrl+alt+shift+j',
+      up: 'ctrl+alt+shift+k'
     });
   });
 
@@ -49,7 +49,7 @@ describe('parseConfig', () => {
   it('overrides a single shortcut', () => {
     const config = parseConfig({ shortcuts: { right: 'ctrl+shift+r' } });
     expect(config.shortcuts.right).toBe('ctrl+shift+r');
-    expect(config.shortcuts.left).toBe('ctrl+shift+h');
+    expect(config.shortcuts.left).toBe('ctrl+alt+shift+h');
   });
 
   it('removes a shortcut when set to null', () => {
@@ -64,6 +64,6 @@ describe('parseConfig', () => {
 
   it('falls back to defaults for invalid settings value', () => {
     const config = parseConfig('not-an-object');
-    expect(config.shortcuts).toMatchObject({ right: 'ctrl+shift+l' });
+    expect(config.shortcuts).toMatchObject({ right: 'ctrl+alt+shift+l' });
   });
 });

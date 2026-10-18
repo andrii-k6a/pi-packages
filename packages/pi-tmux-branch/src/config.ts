@@ -16,10 +16,10 @@ export type DirectionConfig = {
 };
 
 export const directionConfig: Record<Direction, DirectionConfig> = {
-  right: { description: 'on the right', splitFlag: '-h', before: false, shortcut: 'ctrl+shift+l' },
-  left: { description: 'on the left', splitFlag: '-h', before: true, shortcut: 'ctrl+shift+h' },
-  down: { description: 'below', splitFlag: '-v', before: false, shortcut: 'ctrl+shift+j' },
-  up: { description: 'above', splitFlag: '-v', before: true, shortcut: 'ctrl+shift+k' }
+  right: { description: 'right', splitFlag: '-h', before: false, shortcut: 'ctrl+alt+shift+l' },
+  left: { description: 'left', splitFlag: '-h', before: true, shortcut: 'ctrl+alt+shift+h' },
+  down: { description: 'below', splitFlag: '-v', before: false, shortcut: 'ctrl+alt+shift+j' },
+  up: { description: 'above', splitFlag: '-v', before: true, shortcut: 'ctrl+alt+shift+k' }
 };
 
 export type Config = {

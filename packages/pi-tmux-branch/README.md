@@ -75,12 +75,12 @@ By default, Vim-style shortcuts mirror tmux pane navigation: `h/j/k/l` = left/do
 
 | Shortcut | Behavior |
 | --- | --- |
-| `Ctrl+Shift+L` | Branch the current Pi session into a new tmux pane on the right |
-| `Ctrl+Shift+H` | Branch the current Pi session into a new tmux pane on the left |
-| `Ctrl+Shift+J` | Branch the current Pi session into a new tmux pane below |
-| `Ctrl+Shift+K` | Branch the current Pi session into a new tmux pane above |
+| `Ctrl+Alt+Shift+L` | Branch the current Pi session into a new tmux pane on the right |
+| `Ctrl+Alt+Shift+H` | Branch the current Pi session into a new tmux pane on the left |
+| `Ctrl+Alt+Shift+J` | Branch the current Pi session into a new tmux pane below |
+| `Ctrl+Alt+Shift+K` | Branch the current Pi session into a new tmux pane above |
 
-> Note: your terminal and tmux configuration must pass `Ctrl+Shift+<letter>` key combinations through to Pi distinctly for the shortcuts to work.
+> Note: your terminal and tmux configuration must pass `Ctrl+Alt+Shift+<letter>` key combinations through to Pi distinctly for the shortcuts to work.
 
 ## Configuration
 
@@ -118,10 +118,10 @@ Use an object to override one or more directions. Missing directions keep their 
 ```json
 {
   "shortcuts": {
-    "right": "ctrl+alt+l",
-    "left": "ctrl+alt+h",
-    "down": "ctrl+alt+j",
-    "up": "ctrl+alt+k"
+    "right": "alt+l",
+    "left": "alt+h",
+    "down": "alt+j",
+    "up": "alt+k"
   }
 }
 ```
