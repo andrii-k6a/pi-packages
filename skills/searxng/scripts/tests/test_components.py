@@ -80,6 +80,25 @@ class FormatterTests(unittest.TestCase):
         self.assertIn('engines: ["first", "second"]', first)
         self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
 
+    def test_preview_reports_which_engines_contributed(self):
+        data = {"results": [
+            {"title": "a", "url": "https://a.example", "engines": ["bing news", "duckduckgo news"]},
+            {"title": "b", "url": "https://b.example", "engines": ["bing news"]},
+            {"title": "c", "url": "https://c.example", "engine": "yahoo"},
+        ]}
+        text = format_results(data, limit=1)  # counts cover hidden results too
+        self.assertIn("engines contributing: bing news=2, duckduckgo news=1, yahoo=1", text)
+
+    def test_empty_results_with_unresponsive_engines_say_not_to_retry_them(self):
+        failed = {"results": [], "unresponsive_engines": [["brave", "Suspended: too many requests"]]}
+        text = format_results(failed)
+        self.assertIn("hint: no results while engines were unresponsive", text)
+        self.assertNotIn("engines contributing", text)
+        self.assertNotIn("\nhint:", format_results({"results": []}))
+        found = {"results": [{"title": "a", "url": "https://a.example", "engine": "x"}],
+                 "unresponsive_engines": [["brave", "CAPTCHA"]]}
+        self.assertNotIn("\nhint:", format_results(found))
+
     def test_config_filter_does_not_remove_saved_engines(self):
         data = {"engines": [
             {"name": "science engine", "categories": ["science"]},

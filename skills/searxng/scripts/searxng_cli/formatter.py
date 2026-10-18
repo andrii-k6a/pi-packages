@@ -11,6 +11,18 @@ def compact(value):
     return " ".join("".join(c if c.isprintable() or c.isspace() else " " for c in value).split())
 
 
+def engine_counts(results: list) -> str:
+    """Count results per contributing engine, so single-engine dependence is visible."""
+    counts: dict = {}
+    for result in results:
+        names = result.get("engines") or result.get("engine") or []
+        if isinstance(names, str):
+            names = [names]
+        for name in {compact(name) for name in names}:
+            counts[name] = counts.get(name, 0) + 1
+    return ", ".join(f"{name}={n}" for name, n in sorted(counts.items(), key=lambda i: (-i[1], i[0])))
+
+
 def format_results(
     data: dict, *, limit: int = 8, offset: int = 0, snippet_chars: int = 500,
 ) -> str:
@@ -18,9 +30,17 @@ def format_results(
     if not isinstance(results, list) or any(not isinstance(item, dict) for item in results):
         raise ValueError("expected a results array of objects")
     lines = [f"query: {compact(data.get('query', ''))} | returned results: {len(results)}"]
+    if results:
+        lines.append(f"engines contributing: {engine_counts(results)}")
     for key in ("answers", "infoboxes", "corrections", "suggestions", "unresponsive_engines"):
         for item in data.get(key) or []:
             lines.append(f"{key}: {compact(item)}")
+    if not results and data.get("unresponsive_engines"):
+        lines.append(
+            "hint: no results while engines were unresponsive; retrying them will not help. "
+            "Use other engines or categories (config without --enabled-only lists default-off "
+            "engines)."
+        )
     end = len(results) if limit == 0 else offset + limit
     for index, result in enumerate(results[offset:end], offset + 1):
         lines.append(f"{index}. {compact(result.get('title', '(untitled)'))}")
