@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { writeSync } from 'node:fs';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { type Args, type ExtensionAPI, parseArgs } from '@earendil-works/pi-coding-agent';
 
 /**
  * Adds `--dump-system-prompt` and `--dump-tools` to Pi.
@@ -9,9 +9,9 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
  *
  * 1. **No-prompt path** (`pi --dump-system-prompt` / `pi --dump-tools`): detected
  *    at extension-setup time, before Pi starts its interactive TUI. A synthetic
- *    child process is spawned with `-p dump` so turn-scoped hooks (e.g.
- *    `before_agent_start`) run normally. The parent exits immediately; the TUI
- *    never initialises.
+ *    child process is spawned with `-p dump` (and `--no-session`, unless the user
+ *    selected a session) so turn-scoped hooks (e.g. `before_agent_start`) run
+ *    normally. The parent exits immediately; the TUI never initialises.
  *
  * 2. **Direct path** (`pi --dump-system-prompt -p "…"` / `pi --dump-tools -p "…"`):
  *    Pi runs in print mode. The `context` hook fires after the full
@@ -25,7 +25,8 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
   });
 
   pi.registerFlag('dump-tools', {
-    description: 'Print all registered tools with descriptions and exit before calling the model',
+    description:
+      'Print all registered tools with descriptions and parameter schemas and exit before calling the model',
     type: 'boolean',
     default: false
   });
@@ -42,12 +43,10 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
     process.exit(0);
   };
 
-  if (
-    (hasDumpSystemPromptFlag() || hasDumpToolsFlag()) &&
-    !hasInitialPrompt() &&
-    process.env.PI_INSPECT_SYNTHETIC_DUMP !== '1'
-  ) {
-    runSyntheticDumpTurn();
+  if (process.env.PI_INSPECT_SYNTHETIC_DUMP !== '1') {
+    // pi.getFlag() is not populated yet at setup time, so parse argv with pi's own parser.
+    const args = parseArgs(process.argv.slice(2));
+    if (needsSyntheticTurn(args)) runSyntheticDumpTurn(args);
   }
 
   pi.on('context', (_event, ctx) => {
@@ -68,7 +67,7 @@ export default function dumpSystemPrompt(pi: ExtensionAPI) {
  * Active tools (those enabled for the current turn) are listed first. Any
  * tools that are registered but not active are appended under a separator.
  * Each entry shows the tool name, its source (e.g. `builtin`, package name),
- * and its description.
+ * its description, and its JSON parameter schema (what the model receives).
  */
 export function formatTools(pi: ExtensionAPI): string {
   const all = pi.getAllTools();
@@ -89,8 +88,10 @@ export function formatTools(pi: ExtensionAPI): string {
     lines.push('');
     lines.push(`${tool.name} [${tool.sourceInfo.source}]`);
     if (tool.description) {
-      lines.push(`  ${tool.description}`);
+      lines.push(indent(tool.description, 2));
     }
+    lines.push('  parameters:');
+    lines.push(indent(JSON.stringify(tool.parameters, null, 2), 4));
   };
 
   for (const tool of active) appendTool(tool);
@@ -104,17 +105,30 @@ export function formatTools(pi: ExtensionAPI): string {
   return lines.join('\n');
 }
 
+/** Indents every non-empty line of `text` by `spaces` spaces. */
+function indent(text: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return text
+    .split('\n')
+    .map((line) => (line ? pad + line : line))
+    .join('\n');
+}
+
 /**
  * Spawns a synthetic `-p dump` child process so Pi assembles a full turn
  * context (including `before_agent_start` hooks) without the parent ever
  * entering interactive TUI mode.
  *
+ * The child gets `--no-session` so the throwaway "dump" turn is not written to
+ * session history, unless the user selected a session (`-c`, `-r`, `--session`,
+ * `--fork`), in which case that session is left to Pi.
+ *
  * The child is guarded by `PI_INSPECT_SYNTHETIC_DUMP=1` to prevent
  * recursive spawning. stdout/stderr are inherited so the child writes directly
  * to the caller's file descriptors — no parent-side buffering needed.
  */
-function runSyntheticDumpTurn(): never {
-  const childArgs = [process.argv[1], ...process.argv.slice(2), '-p', 'dump'];
+function runSyntheticDumpTurn(args: Args): never {
+  const childArgs = [process.argv[1], ...buildSyntheticArgs(process.argv.slice(2), args)];
   const result = spawnSync(process.execPath, childArgs, {
     cwd: process.cwd(),
     env: { ...process.env, PI_INSPECT_SYNTHETIC_DUMP: '1' },
@@ -174,87 +188,49 @@ function isRetryableWriteError(error: unknown): boolean {
 }
 
 /**
- * Returns true if `--dump-system-prompt` (or `--dump-system-prompt=true`) is
- * present in `process.argv`. Used at extension-setup time when `pi.getFlag()`
- * is not yet populated.
+ * Returns the argv for the synthetic child: the user's args plus `-p dump`, and
+ * `--no-session` unless a session was selected. Anything from a bare `--`
+ * onwards is dropped; it is empty here because positional prompts never reach
+ * this point, and appended flags after `--` would be read as messages.
  */
-function hasDumpSystemPromptFlag(): boolean {
-  return process.argv.slice(2).some((arg) => {
-    if (arg === '--dump-system-prompt') return true;
-    if (arg.startsWith('--dump-system-prompt=')) return arg !== '--dump-system-prompt=false';
-    return false;
-  });
+export function buildSyntheticArgs(argv: string[], args: Args): string[] {
+  const separator = argv.indexOf('--');
+  const userArgs = separator === -1 ? argv : argv.slice(0, separator);
+  const selectsSession = args.continue || args.resume || args.session || args.fork;
+  const noSession = selectsSession || args.noSession ? [] : ['--no-session'];
+  return [...userArgs, ...noSession, '-p', 'dump'];
 }
 
 /**
- * Returns true if `--dump-tools` (or `--dump-tools=true`) is present in
- * `process.argv`. Used at extension-setup time when `pi.getFlag()` is not yet
- * populated.
- */
-function hasDumpToolsFlag(): boolean {
-  return process.argv.slice(2).some((arg) => {
-    if (arg === '--dump-tools') return true;
-    if (arg.startsWith('--dump-tools=')) return arg !== '--dump-tools=false';
-    return false;
-  });
-}
-
-/**
- * Returns true if `args` contains a user-supplied prompt (positional text,
- * `@file`, `-p`/`--print` with piped stdin) that would cause Pi to start a
- * real agent turn without the synthetic child.
+ * Returns true when a dump flag was passed but Pi would not run a turn on its
+ * own, so the extension must spawn the synthetic `-p dump` child.
  *
- * Exported for unit testing. Defaults to `process.argv.slice(2)` and
- * `process.stdin.isTTY` so runtime callers need no arguments.
+ * Parsing is delegated to Pi's `parseArgs`, so flag values (`--thinking high`)
+ * and the way Pi's parser swallows a word after a boolean flag
+ * (`--dump-tools hello`) are classified exactly as Pi does. Boolean extension
+ * flags are on whenever present, whatever value follows (`--dump-tools=false`).
+ *
+ * Exported for unit testing. `stdinIsTTY` defaults to `process.stdin.isTTY`.
  */
-export function hasInitialPrompt(
-  args = process.argv.slice(2),
-  stdinIsTTY = process.stdin.isTTY
-): boolean {
-  const flagsWithRequiredValue = new Set([
-    '--provider',
-    '--model',
-    '--api-key',
-    '--system-prompt',
-    '--append-system-prompt',
-    '--mode',
-    '--session',
-    '--fork',
-    '--session-dir',
-    '--models',
-    '--tools',
-    '-t',
-    '--extension',
-    '-e',
-    '--skill',
-    '--prompt-template',
-    '--theme',
-    '--export'
-  ]);
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    if (arg === '--dump-system-prompt') continue;
-    if (arg === '--dump-tools') continue;
-    if ((arg === '--print' || arg === '-p') && !stdinIsTTY) return true;
-    if (arg.startsWith('@')) return true;
-
-    if (arg === '--list-models') {
-      // Optional search arg; either way Pi exits before a prompt would run.
-      return true;
-    }
-
-    if (flagsWithRequiredValue.has(arg)) {
-      i++;
-      continue;
-    }
-
-    if (arg.startsWith('--') && arg.includes('=')) continue;
-    if (arg.startsWith('-')) continue;
-
-    return true;
+export function needsSyntheticTurn(args: Args, stdinIsTTY = process.stdin.isTTY): boolean {
+  if (!args.unknownFlags.has('dump-system-prompt') && !args.unknownFlags.has('dump-tools')) {
+    return false;
   }
 
-  return false;
+  // Pi handles these itself and exits (or runs a real turn) without our help.
+  // RPC mode ignores `-p`, so a synthetic child would never run a turn; the dump
+  // happens on the first prompt sent over RPC instead.
+  if (
+    args.help ||
+    args.version ||
+    args.export !== undefined ||
+    args.listModels !== undefined ||
+    args.mode === 'rpc'
+  ) {
+    return false;
+  }
+
+  const hasPrompt = args.messages.length > 0 || args.fileArgs.length > 0;
+  const hasPipedPrompt = args.print === true && !stdinIsTTY;
+  return !hasPrompt && !hasPipedPrompt;
 }

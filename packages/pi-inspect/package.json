@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Pi extension that adds --dump-system-prompt and --dump-tools to inspect Pi session internals and exit.",
   "type": "module",
+  "license": "MIT",
   "keywords": [
     "pi-package",
     "pi-extension",
