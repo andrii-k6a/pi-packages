@@ -8,6 +8,11 @@ export const directions = ['right', 'left', 'down', 'up'] as const;
 export type Direction = (typeof directions)[number];
 export type ShortcutConfig = Partial<Record<Direction, ShortcutKey>>;
 
+export function parseDirection(value: string): Direction | undefined {
+  const normalized = value.trim().toLowerCase();
+  return directions.find((direction) => direction === normalized);
+}
+
 export type DirectionConfig = {
   description: string;
   splitFlag: '-h' | '-v';

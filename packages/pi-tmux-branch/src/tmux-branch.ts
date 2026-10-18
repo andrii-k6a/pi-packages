@@ -5,7 +5,17 @@ import {
   type ExtensionContext,
   SessionManager
 } from '@earendil-works/pi-coding-agent';
-import { type Direction, directionConfig, directions, loadConfig } from './config.js';
+import {
+  type Direction,
+  directionConfig,
+  directions,
+  loadConfig,
+  parseDirection
+} from './config.js';
+
+const COMMAND_NAME = 'tmux-branch';
+const DEFAULT_DIRECTION: Direction = 'right';
+const COMMAND_USAGE = `Usage: /${COMMAND_NAME} [${directions.join('|')}] (default: ${DEFAULT_DIRECTION})`;
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -173,13 +183,33 @@ async function branchIntoPaneFromShortcut(
   await branchIntoPaneNow(pi, direction, ctx);
 }
 
+function directionCompletions(prefix: string) {
+  const normalized = prefix.trim().toLowerCase();
+  const items = directions
+    .filter((direction) => direction.startsWith(normalized))
+    .map((direction) => ({
+      value: direction,
+      label: direction,
+      description: branchDescription(direction)
+    }));
+
+  return items.length > 0 ? items : null;
+}
+
 export default function (pi: ExtensionAPI): void {
-  for (const direction of directions) {
-    pi.registerCommand(`tmux-branch-${direction}`, {
-      description: branchDescription(direction),
-      handler: async (_args, ctx) => branchIntoPaneFromCommand(pi, direction, ctx)
-    });
-  }
+  pi.registerCommand(COMMAND_NAME, {
+    description: `Branch the current Pi session into a new tmux pane (${directions.join('|')})`,
+    getArgumentCompletions: directionCompletions,
+    handler: async (args, ctx) => {
+      const direction = args.trim() ? parseDirection(args) : DEFAULT_DIRECTION;
+      if (!direction) {
+        ctx.ui.notify(COMMAND_USAGE, 'error');
+        return;
+      }
+
+      await branchIntoPaneFromCommand(pi, direction, ctx);
+    }
+  });
 
   const config = loadConfig();
   for (const direction of directions) {

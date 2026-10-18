@@ -44,7 +44,7 @@ Only explicit temporary extension flags from the current process are copied. Ins
 
 ## Usage
 
-Run one of the `/tmux-branch-*` commands or use a shortcut. The extension branches the current Pi session and opens the branch in a new tmux pane.
+Run `/tmux-branch [direction]` (`right`, `left`, `down`, or `up`; defaults to `right`) or use a shortcut. The extension branches the current Pi session and opens the branch in a new tmux pane.
 
 If the current Pi conversation has not been persisted yet, such as immediately after starting Pi before the first assistant response, the extension opens a fresh Pi conversation in the requested tmux pane instead of branching. If the current Pi process was started with `--no-session`, the fresh pane also uses `--no-session`.
 
@@ -60,14 +60,19 @@ The extension intentionally creates the branched session directly instead of usi
 
 ## Controls
 
-### Commands
+### Command
+
+`/tmux-branch [direction]` — the direction argument is optional, defaults to `right`, and supports tab completion.
 
 | Command | Behavior |
 | --- | --- |
-| `/tmux-branch-right` | Branch the current Pi session into a new tmux pane on the right |
-| `/tmux-branch-left` | Branch the current Pi session into a new tmux pane on the left |
-| `/tmux-branch-down` | Branch the current Pi session into a new tmux pane below |
-| `/tmux-branch-up` | Branch the current Pi session into a new tmux pane above |
+| `/tmux-branch` | Same as `/tmux-branch right` |
+| `/tmux-branch right` | Branch the current Pi session into a new tmux pane on the right |
+| `/tmux-branch left` | Branch the current Pi session into a new tmux pane on the left |
+| `/tmux-branch down` | Branch the current Pi session into a new tmux pane below |
+| `/tmux-branch up` | Branch the current Pi session into a new tmux pane above |
+
+An unknown direction displays a usage error and does nothing.
 
 ### Default shortcuts
 
@@ -84,7 +89,7 @@ By default, Vim-style shortcuts mirror tmux pane navigation: `h/j/k/l` = left/do
 
 ## Configuration
 
-Slash commands are always registered. Shortcuts are configured with `settings.json` under the extension's Pi config directory:
+The slash command is always registered. Shortcuts are configured with `settings.json` under the extension's Pi config directory:
 
 - global: `~/.pi/agent/pi-tmux-branch/settings.json`
 - project-local: `<project>/.pi/pi-tmux-branch/settings.json`
@@ -93,7 +98,7 @@ Project-local configuration uses whole-file precedence over global configuration
 
 ### Commands only
 
-Disable shortcut registration while keeping slash commands available:
+Disable shortcut registration while keeping the slash command available:
 
 ```json
 {

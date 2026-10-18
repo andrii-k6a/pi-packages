@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { directionConfig, directions, parseConfig } from '../src/config.js';
+import { directionConfig, directions, parseConfig, parseDirection } from '../src/config.js';
 
 describe('directions', () => {
   it('contains all four directions', () => {
@@ -22,6 +22,24 @@ describe('directionConfig', () => {
   it('uses -v split for up and down', () => {
     expect(directionConfig.up.splitFlag).toBe('-v');
     expect(directionConfig.down.splitFlag).toBe('-v');
+  });
+});
+
+describe('parseDirection', () => {
+  it('parses every direction', () => {
+    for (const d of directions) {
+      expect(parseDirection(d)).toBe(d);
+    }
+  });
+
+  it('trims whitespace and ignores case', () => {
+    expect(parseDirection('  LEFT ')).toBe('left');
+  });
+
+  it('returns undefined for empty or unknown input', () => {
+    expect(parseDirection('')).toBeUndefined();
+    expect(parseDirection('sideways')).toBeUndefined();
+    expect(parseDirection('right left')).toBeUndefined();
   });
 });
 
