@@ -25,7 +25,6 @@
   "pi": {
     "extensions": [
       "./packages/pi-feedback/src/feedback.ts",
-      "./packages/pi-head/src/head.ts",
       "./packages/pi-inspect/src/inspect.ts",
       "./packages/pi-generative-ui/src/generative-ui.ts",
       "./packages/pi-tmux-branch/src/tmux-branch.ts",
