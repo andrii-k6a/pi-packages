@@ -67,7 +67,7 @@ export function selectInhibitor(
 function macInhibitor(mode: CaffeinateMode): InhibitorCommand {
   return {
     executable: 'caffeinate',
-    args: mode === 'sleep' ? ['-ims'] : ['-dimsu'],
+    args: mode === 'system' ? ['-ims'] : ['-dimsu'],
     label: `caffeinate (${formatMode(mode)})`
   };
 }
@@ -158,7 +158,7 @@ function invalidCommand(reason: string): Error {
 }
 
 export function windowsInhibitorScript(mode: CaffeinateMode): string {
-  const flags = mode === 'sleep' ? '0x80000001' : '0x80000003';
+  const flags = mode === 'system' ? '0x80000001' : '0x80000003';
   return [
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -Namespace PiCaffeinate -Name Power -MemberDefinition \'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);\'',
@@ -173,7 +173,7 @@ export function windowsInhibitorScript(mode: CaffeinateMode): string {
 }
 
 export function formatMode(mode: CaffeinateMode): string {
-  return mode === 'sleep' ? 'system-awake' : 'display-awake';
+  return mode === 'system' ? 'system-awake' : 'display-awake';
 }
 
 export function commandOnPath(

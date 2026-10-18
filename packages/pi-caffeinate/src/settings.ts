@@ -7,7 +7,7 @@ import { getAgentDir } from '@earendil-works/pi-coding-agent';
 const SETTINGS_FILE = 'pi-caffeinate.json';
 const LEGACY_SETTINGS_FILE = 'pi-caffeinate-settings.json';
 
-export type CaffeinateMode = 'sleep' | 'display';
+export type CaffeinateMode = 'system' | 'display';
 
 export interface CaffeinateSettings {
   mode: CaffeinateMode;
@@ -35,7 +35,7 @@ let saves: Promise<void> = Promise.resolve();
 export function normalizeCaffeinateSettings(value: unknown): CaffeinateSettings | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const candidate = value as { mode?: unknown; quiet?: unknown; updatedAt?: unknown };
-  if (candidate.mode !== 'sleep' && candidate.mode !== 'display') return undefined;
+  if (candidate.mode !== 'system' && candidate.mode !== 'display') return undefined;
   if (candidate.quiet !== undefined && typeof candidate.quiet !== 'boolean') return undefined;
   if (candidate.updatedAt !== undefined && typeof candidate.updatedAt !== 'number')
     return undefined;
@@ -152,7 +152,7 @@ async function readDocument(filePath: string): Promise<ReadDocument> {
       return {
         result: {
           kind: 'invalid',
-          reason: `${filePath}: expected mode "sleep" or "display", with optional boolean quiet`
+          reason: `${filePath}: expected mode "system" or "display", with optional boolean quiet`
         }
       };
     }

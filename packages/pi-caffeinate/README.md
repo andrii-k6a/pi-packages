@@ -19,10 +19,10 @@ pi -e ./packages/pi-caffeinate
 
 ```text
 /caffeinate           Open the interactive controls when a UI is available
-/caffeinate display   Keep the system and display awake (default)
-/caffeinate sleep     Keep the system awake while allowing display idle
+/caffeinate display   Keep the system and display awake
+/caffeinate system    Keep the system awake while allowing display idle (default)
 /caffeinate status    Show mode, settings, and inhibitor state
-/caffeinate mode      Select display or sleep mode in an interactive UI
+/caffeinate mode      Select system or display mode in an interactive UI
 /caffeinate stop      Release the current inhibitor until the next agent run
 /caffeinate help      Show the command summary
 ```
@@ -37,7 +37,7 @@ not expose direct-command output.
 - macOS uses `caffeinate`.
 - Windows uses a PowerShell process that maintains the appropriate execution-state flag.
 - WSL uses `powershell.exe` when it is available.
-- Linux uses `systemd-inhibit --what=sleep ... sleep infinity` for sleep mode.
+- Linux uses `systemd-inhibit --what=sleep ... sleep infinity` for system mode.
   Display mode uses `systemd-inhibit --what=idle:sleep ... sleep infinity` and
   also asks the standard ScreenSaver session service for idle inhibition.
 - On Linux without systemd, `caffeinate` is used when present. Display mode also
@@ -60,13 +60,13 @@ and remembers `quiet` if it is already present:
 
 ```json
 {
-  "mode": "display",
+  "mode": "system",
   "quiet": false,
   "updatedAt": 1767225600000
 }
 ```
 
-Missing or invalid settings fall back to display mode. Invalid recognized
+Missing or invalid settings fall back to system mode. Invalid recognized
 settings are never overwritten by a mode command: repair the file first.
 The legacy `pi-caffeinate-settings.json` name is read for compatibility, while
 new saves always write the canonical file.

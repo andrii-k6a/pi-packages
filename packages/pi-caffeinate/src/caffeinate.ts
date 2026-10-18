@@ -33,19 +33,23 @@ import {
 } from './settings.js';
 
 const STATUS_KEY = 'caffeinate';
-const DEFAULT_MODE = 'display' satisfies CaffeinateMode;
+const DEFAULT_MODE = 'system' satisfies CaffeinateMode;
 const DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
 
 const completionItems = [
   { value: 'display', label: 'display', description: 'Keep the system and display awake' },
-  { value: 'sleep', label: 'sleep', description: 'Keep the system awake and allow display sleep' },
+  {
+    value: 'system',
+    label: 'system',
+    description: 'Keep the system awake and allow display sleep'
+  },
   { value: 'status', label: 'status', description: 'Show keep-awake status' },
   { value: 'mode', label: 'mode', description: 'Choose a keep-awake mode' },
   { value: 'stop', label: 'stop', description: 'Release the inhibitor until the next agent run' },
   { value: 'help', label: 'help', description: 'Show command help' }
 ];
 
-export type CaffeinateAction = 'menu' | 'help' | 'status' | 'mode' | 'sleep' | 'display' | 'stop';
+export type CaffeinateAction = 'menu' | 'help' | 'status' | 'mode' | 'system' | 'display' | 'stop';
 
 export interface CaffeinateOptions {
   dbusFactory?: ScreenSaverFactory;
@@ -175,13 +179,13 @@ export default function caffeinate(pi: ExtensionAPI, options: CaffeinateOptions 
       if (isCurrent(generation)) updateStatus(ctx);
       return;
     }
-    if (action === 'sleep' || action === 'display') {
+    if (action === 'system' || action === 'display') {
       await queueModeChange(() => setMode(ctx, action, generation));
       return;
     }
     if (!ctx.hasUI) {
       const usage =
-        action === 'mode' ? 'sleep or display' : 'status, sleep, display, stop, or help';
+        action === 'mode' ? 'system or display' : 'status, system, display, stop, or help';
       ctx.ui.notify(
         `Interactive selection is unavailable here. Use /caffeinate ${usage}.`,
         'warning'
@@ -191,18 +195,18 @@ export default function caffeinate(pi: ExtensionAPI, options: CaffeinateOptions 
     if (action === 'mode') {
       const selected = await ctx.ui.select('Choose a keep-awake mode', [
         'display — keep the system and display awake',
-        'sleep — keep the system awake and allow display sleep'
+        'system — keep the system awake and allow display sleep'
       ]);
       if (!isCurrent(generation) || !selected) return;
       await queueModeChange(() =>
-        setMode(ctx, selected.startsWith('sleep') ? 'sleep' : 'display', generation)
+        setMode(ctx, selected.startsWith('system') ? 'system' : 'display', generation)
       );
       return;
     }
 
     const selected = await ctx.ui.select(`pi-caffeinate\n\n${describeState()}`, [
       'display — keep the system and display awake',
-      'sleep — keep the system awake and allow display sleep',
+      'system — keep the system awake and allow display sleep',
       'status — show status',
       'stop — release current inhibitor',
       'help — show command help'
@@ -237,7 +241,7 @@ export default function caffeinate(pi: ExtensionAPI, options: CaffeinateOptions 
 
     // A D-Bus-only display start has no active backend until Inhibit resolves.
     // Invalidate it before the selected mode changes, so that result can never
-    // attach itself after a sleep-mode restart.
+    // attach itself after a system-mode restart.
     if (restart) await stopInhibition(ctx, 'mode changed', false);
     if (!isCurrent(generation)) return;
 
@@ -648,7 +652,7 @@ export function parseCommand(args: string): CaffeinateAction | 'unknown' {
   if (command === 'help') return 'help';
   if (command === 'status') return 'status';
   if (command === 'mode' || command === 'config' || command === 'settings') return 'mode';
-  if (command === 'sleep' || command === 'system') return 'sleep';
+  if (command === 'system') return 'system';
   if (command === 'display' || command === 'screen') return 'display';
   if (command === 'stop' || command === 'off') return 'stop';
   return 'unknown';
@@ -666,7 +670,7 @@ function commandGuide(): string {
     'pi-caffeinate commands:',
     '/caffeinate — open keep-awake controls',
     '/caffeinate display — keep the system and display awake',
-    '/caffeinate sleep — keep the system awake while allowing display sleep',
+    '/caffeinate system — keep the system awake while allowing display sleep',
     '/caffeinate status — show current status',
     '/caffeinate mode — select a mode',
     '/caffeinate stop — release the inhibitor until the next agent run'

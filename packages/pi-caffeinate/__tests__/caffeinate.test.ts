@@ -162,6 +162,14 @@ async function withAgentDir<T>(fn: (directory: string) => Promise<T>): Promise<T
   }
 }
 
+async function useDisplayMode(directory: string): Promise<void> {
+  await writeFile(
+    path.join(directory, 'pi-caffeinate.json'),
+    JSON.stringify({ mode: 'display', quiet: false, updatedAt: 1 }),
+    'utf8'
+  );
+}
+
 async function asLinux<T>(fn: () => Promise<T>): Promise<T> {
   const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { value: 'linux' });
@@ -174,7 +182,7 @@ async function asLinux<T>(fn: () => Promise<T>): Promise<T> {
 
 test('parses commands, completions, custom commands, and platform inhibitor choices', () => {
   assert.equal(parseCommand(''), 'menu');
-  assert.equal(parseCommand(' system '), 'sleep');
+  assert.equal(parseCommand(' system '), 'system');
   assert.equal(parseCommand('screen'), 'display');
   assert.equal(parseCommand('off'), 'stop');
   assert.equal(parseCommand('bad'), 'unknown');
@@ -194,7 +202,7 @@ test('parses commands, completions, custom commands, and platform inhibitor choi
     '--flag'
   ]);
 
-  const custom = selectInhibitor('sleep', {
+  const custom = selectInhibitor('system', {
     platform: 'linux',
     environment: { PI_CAFFEINATE_COMMAND: `runner --label 'keep awake'` },
     commandExists: () => false
@@ -217,7 +225,7 @@ test('parses commands, completions, custom commands, and platform inhibitor choi
   assert.deepEqual(systemd?.args.slice(-2), ['sleep', 'infinity']);
   assert.equal(systemd?.needsScreenSaverInhibit, true);
 
-  const wsl = selectInhibitor('sleep', {
+  const wsl = selectInhibitor('system', {
     platform: 'linux',
     environment: {},
     commandExists: (command) => command === 'powershell.exe',
@@ -226,7 +234,7 @@ test('parses commands, completions, custom commands, and platform inhibitor choi
   assert.equal(wsl?.executable, 'powershell.exe');
   assert.equal(wsl?.releaseOnStdinClose, true);
   assert.match(windowsInhibitorScript('display'), /0x80000003/);
-  assert.equal(formatMode('sleep'), 'system-awake');
+  assert.equal(formatMode('system'), 'system-awake');
 });
 
 test('parses the defined shell-free custom-command grammar', () => {
@@ -267,9 +275,9 @@ test('settings validation and persistence preserve fields and reject malformed s
       JSON.stringify({ mode: 'display', quiet: true, extra: 1 }),
       'utf8'
     );
-    await saveSettings({ mode: 'sleep', updatedAt: 4 });
+    await saveSettings({ mode: 'system', updatedAt: 4 });
     assert.deepEqual(JSON.parse(await readFile(settingsPath, 'utf8')), {
-      mode: 'sleep',
+      mode: 'system',
       quiet: true,
       updatedAt: 4,
       extra: 1
@@ -287,9 +295,9 @@ test('mode commands persist settings and surface save errors without changing th
     const harness = createPi();
     caffeinate(harness.pi as never, { selectCommand: () => undefined });
     const context = new FakeContext(false);
-    await harness.commands.get('caffeinate')?.('sleep', context);
+    await harness.commands.get('caffeinate')?.('system', context);
     const saved = JSON.parse(await readFile(path.join(directory, 'pi-caffeinate.json'), 'utf8'));
-    assert.equal(saved.mode, 'sleep');
+    assert.equal(saved.mode, 'system');
     assert.match(context.notifications.at(-1)?.message ?? '', /system-awake and saved/);
 
     await writeFile(path.join(directory, 'pi-caffeinate.json'), '{"mode":"bad"}', 'utf8');
@@ -311,7 +319,7 @@ test('lifecycle retains inhibition across retries and releases it after settleme
     await emit(harness, 'session_start', context);
     await emit(harness, 'agent_start', context);
     assert.equal(children.length, 1);
-    assert.equal(context.statuses.get('caffeinate'), 'display-awake');
+    assert.equal(context.statuses.get('caffeinate'), 'system-awake');
 
     await emit(harness, 'agent_end', context);
     assert.equal(children[0]?.killCalls.length, 0);
@@ -339,8 +347,28 @@ test('lifecycle retains inhibition across retries and releases it after settleme
   });
 });
 
+test('the default mode is system when no settings file exists', async () => {
+  await withAgentDir(async () => {
+    const selectedModes: string[] = [];
+    const harness = createPi();
+    caffeinate(harness.pi as never, {
+      selectCommand: (mode) => {
+        selectedModes.push(mode);
+        return { executable: 'fake', args: [], label: `${mode} inhibitor` };
+      },
+      startProcess: fakeStarter([])
+    });
+    const context = new FakeContext();
+    await emit(harness, 'session_start', context);
+    await emit(harness, 'agent_start', context);
+    assert.deepEqual(selectedModes, ['system']);
+    await harness.commands.get('caffeinate')?.('status', context);
+    assert.match(context.notifications.at(-1)?.message ?? '', /Mode: system-awake/);
+  });
+});
+
 test('explicit mode selections restart an unavailable built-in inhibitor', async () => {
-  for (const targetMode of ['sleep', 'display'] as const) {
+  for (const targetMode of ['system', 'display'] as const) {
     await withAgentDir(async () => {
       const selectedModes: string[] = [];
       const children: FakeChild[] = [];
@@ -359,7 +387,7 @@ test('explicit mode selections restart an unavailable built-in inhibitor', async
       assert.equal(context.statuses.get('caffeinate'), 'unavailable');
 
       await harness.commands.get('caffeinate')?.(targetMode, context);
-      assert.deepEqual(selectedModes, ['display', targetMode]);
+      assert.deepEqual(selectedModes, ['system', targetMode]);
       assert.equal(children.length, 2);
       assert.equal(context.statuses.get('caffeinate'), formatMode(targetMode));
     });
@@ -378,12 +406,12 @@ test('mode selection after a manual stop saves without restarting', async () => 
     await emit(harness, 'session_start', context);
     await emit(harness, 'agent_start', context);
     await harness.commands.get('caffeinate')?.('stop', context);
-    await harness.commands.get('caffeinate')?.('sleep', context);
+    await harness.commands.get('caffeinate')?.('system', context);
 
     assert.equal(children.length, 1);
     assert.equal(
       JSON.parse(await readFile(path.join(directory, 'pi-caffeinate.json'), 'utf8')).mode,
-      'sleep'
+      'system'
     );
   });
 });
@@ -404,13 +432,13 @@ test('mode selection with an active custom command saves without restarting', as
     const context = new FakeContext();
     await emit(harness, 'session_start', context);
     await emit(harness, 'agent_start', context);
-    await harness.commands.get('caffeinate')?.('sleep', context);
+    await harness.commands.get('caffeinate')?.('system', context);
 
     assert.equal(children.length, 1);
     assert.equal(children[0]?.killCalls.length, 0);
     assert.equal(
       JSON.parse(await readFile(path.join(directory, 'pi-caffeinate.json'), 'utf8')).mode,
-      'sleep'
+      'system'
     );
   });
 });
@@ -431,7 +459,7 @@ test('a malformed custom command becomes unavailable without spawning or rejecti
       assert.match(context.notifications.at(-1)?.message ?? '', /^Invalid PI_CAFFEINATE_COMMAND/);
       const command = harness.commands.get('caffeinate');
       assert.ok(command);
-      await assert.doesNotReject(command('sleep', context));
+      await assert.doesNotReject(command('system', context));
       assert.equal(children.length, 0);
       assert.equal(context.statuses.get('caffeinate'), 'unavailable');
     });
@@ -534,18 +562,19 @@ test('native Pi selection is guarded outside UI and routes selected mode through
     );
 
     const interactiveContext = new FakeContext(true, [
-      'sleep — keep the system awake and allow display sleep'
+      'system — keep the system awake and allow display sleep'
     ]);
     await harness.commands.get('caffeinate')?.('mode', interactiveContext);
     assert.equal(interactiveContext.selectCalls, 1);
     const saved = JSON.parse(await readFile(path.join(directory, 'pi-caffeinate.json'), 'utf8'));
-    assert.equal(saved.mode, 'sleep');
+    assert.equal(saved.mode, 'system');
   });
 });
 
 test('Linux D-Bus-only fallback, D-Bus failure, and cleanup are safe', async () => {
   await asLinux(async () => {
-    await withAgentDir(async () => {
+    await withAgentDir(async (directory) => {
+      await useDisplayMode(directory);
       const clients: FakeScreenSaver[] = [];
       const harness = createPi();
       caffeinate(harness.pi as never, {
@@ -571,7 +600,8 @@ test('Linux D-Bus-only fallback, D-Bus failure, and cleanup are safe', async () 
 
 test('Linux retains a process fallback when ScreenSaver acquisition fails', async () => {
   await asLinux(async () => {
-    await withAgentDir(async () => {
+    await withAgentDir(async (directory) => {
+      await useDisplayMode(directory);
       const children: FakeChild[] = [];
       const harness = createPi();
       const command: InhibitorCommand = {
@@ -600,9 +630,10 @@ test('Linux retains a process fallback when ScreenSaver acquisition fails', asyn
   });
 });
 
-test('a sleep mode transaction cancels a pending display D-Bus start', async () => {
+test('a system mode transaction cancels a pending display D-Bus start', async () => {
   await asLinux(async () => {
-    await withAgentDir(async () => {
+    await withAgentDir(async (directory) => {
+      await useDisplayMode(directory);
       let release: (() => void) | undefined;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -612,7 +643,9 @@ test('a sleep mode transaction cancels a pending display D-Bus start', async () 
       const harness = createPi();
       caffeinate(harness.pi as never, {
         selectCommand: (mode) =>
-          mode === 'sleep' ? { executable: 'fake', args: [], label: 'sleep inhibitor' } : undefined,
+          mode === 'system'
+            ? { executable: 'fake', args: [], label: 'system inhibitor' }
+            : undefined,
         startProcess: fakeStarter(children),
         dbusFactory: fakeDbus(clients, gate)
       });
@@ -621,12 +654,12 @@ test('a sleep mode transaction cancels a pending display D-Bus start', async () 
       const start = emit(harness, 'agent_start', context);
       await waitFor(() => clients.length === 1 && clients[0]?.inhibitCalls.length === 1);
 
-      const sleep = harness.commands.get('caffeinate')?.('sleep', context);
+      const system = harness.commands.get('caffeinate')?.('system', context);
       await waitFor(() => clients[0]?.inhibitSignal?.aborted === true);
       assert.equal(clients[0]?.closeCalls, 1);
 
       release?.();
-      await Promise.all([start, sleep]);
+      await Promise.all([start, system]);
       assert.equal(clients[0]?.uninhibitCalls, 0);
       assert.equal(clients[0]?.closeCalls, 1);
       assert.equal(children.length, 1);
@@ -639,7 +672,8 @@ test('a sleep mode transaction cancels a pending display D-Bus start', async () 
 
 test('stop aborts and closes an in-flight Linux D-Bus acquisition', async () => {
   await asLinux(async () => {
-    await withAgentDir(async () => {
+    await withAgentDir(async (directory) => {
+      await useDisplayMode(directory);
       let release: (() => void) | undefined;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
