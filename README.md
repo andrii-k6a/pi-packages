@@ -51,6 +51,10 @@ cd packages/<package-name>
 pi -e .
 ```
 
+## Third-party skills
+
+Not vendored here. Install them with `scripts/install-skills.sh`; add a line there to track a new one.
+
 ## Community Skills
 
 Catalogs and collections for inspiration:
