@@ -1,0 +1,6 @@
+{
+  "servers": {
+    "github": { "tools": ["search_*", "get_*"] },
+    "docs": {}
+  }
+}

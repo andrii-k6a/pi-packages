@@ -32,11 +32,14 @@ declare global {
     label?: string;
     /** Override the current runtime phase for this agent. */
     phase?: string;
-    /** JSON Schema for structured output. When present, the returned value is typed as unknown unless you provide a generic. */
+    /**
+     * JSON Schema for structured output; its root must be `type: 'object'` (wrap lists in a property).
+     * When present, the returned value is typed as unknown unless you provide a generic.
+     */
     schema?: TSchema;
     /** Optional approved profile name for this subagent. */
     profile?: string;
-    /** Requested isolation mode. */
+    /** Non-enforced prompt hint. Does not create a worktree or change filesystem access. */
     isolation?: 'worktree';
     /** Requested subagent role/type. */
     agentType?: string;
@@ -61,7 +64,7 @@ declare global {
   }
 
   interface WorkflowBudget {
-    /** Optional total token limit; null means no limit. */
+    /** Soft token limit set by the workflow call's `tokenBudget`; null means no limit. */
     total: number | null;
     /** Tokens reported by subagents; successful runs with no usage report use an estimate. */
     spent(): number;
@@ -69,25 +72,44 @@ declare global {
     remaining(): number;
   }
 
-  /** Spawn a subagent. Returns final text unless a structured-output schema is used with an explicit generic. */
-  function agent<T = string>(prompt: string, options?: WorkflowAgentOptions): Promise<T>;
+  /**
+   * Spawn a subagent with separate conversation context, but shared filesystem access.
+   * Ordinary executor failures return null. Abort and profile routing failures reject.
+   * Prose output is string; schema output is unknown unless an explicit generic is supplied.
+   *
+   * Runs are durable: when a run is resumed the script is replayed from the top, and an identical call
+   * (same prompt, label, instructions, schema, and route) returns its recorded result instead of running again.
+   */
+  function agent<T = unknown>(
+    prompt: string,
+    options: WorkflowAgentOptions & { schema: JsonSchema }
+  ): Promise<T | null>;
+  function agent(
+    prompt: string,
+    options?: WorkflowAgentOptions & { schema?: undefined }
+  ): Promise<string | null>;
+  /** Optional-schema options return unknown; a result generic requires a schema that is present. */
+  function agent(prompt: string, options: WorkflowAgentOptions): Promise<unknown>;
 
-  /** Run independent async tasks concurrently. Pass functions, not already-created promises. */
-  function parallel<T>(thunks: Array<() => Promise<T>>): Promise<T[]>;
+  /** Run independent async tasks concurrently. Ordinary branch failures return null. Pass functions, not promises. */
+  function parallel<T>(thunks: Array<() => Promise<T>>): Promise<Array<T | null>>;
 
-  /** Run each item through sequential async stages while different items may run concurrently. */
+  /** Run each item through sequential async stages while items fan out. Ordinary stage failures return null. */
   function pipeline<TItem, TResult = unknown>(
     items: TItem[],
     ...stages: Array<(previous: unknown, original: TItem, index: number) => TResult | Promise<TResult>>
-  ): Promise<TResult[]>;
+  ): Promise<Array<TResult | null>>;
 
   /** Mark the current workflow phase for progress grouping and optionally select an approved profile. */
   function phase(title: string, options?: { profile?: string }): void;
 
-  /** Append a workflow-level log line. */
-  function log(message: unknown): void;
+  /**
+   * Append a workflow-level log line. Every value is recorded, space-separated; strings stay as
+   * they are and other values are inspected. `console.log` behaves the same.
+   */
+  function log(...values: unknown[]): void;
 
-  /** Optional JSON args passed to the workflow tool. Narrow with a local type assertion when needed. */
+  /** Optional JSON object passed to the workflow tool. Narrow with a local type assertion when needed. */
   const args: unknown;
 
   /** Current working directory for the workflow/subagents. */

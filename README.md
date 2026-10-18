@@ -12,7 +12,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [@andrii-k6a/pi-feedback](./packages/pi-feedback/) | Extension | Review assistant replies in your editor and submit as feedback (`/feedback`) |
 | [@andrii-k6a/pi-inspect](./packages/pi-inspect/) | Extension | Print the assembled system prompt and exit (`--dump-system-prompt`, `--dump-tools`) |
 | [@andrii-k6a/pi-tmux-branch](./packages/pi-tmux-branch/) | Extension | Branch the current Pi session into a new tmux pane (`/tmux-branch [direction]`) |
-| [@andrii-k6a/pi-dynamic-workflows](./packages/pi-dynamic-workflows/) | Extension | Claude-Code-style dynamic workflows — fan work out across isolated subagents via a `workflow` tool |
+| [@andrii-k6a/pi-dynamic-workflows](./packages/pi-dynamic-workflows/) | Extension | Dynamic workflows — fan work out across subagents with separate conversation contexts via a `workflow` tool |
 | [@andrii-k6a/pi-ask-question](./packages/pi-ask-question/) | Extension | Ask up to four multiple-choice questions in a terminal dialog and return structured answers (`ask_user_question`) |
 | [@andrii-k6a/pi-caffeinate](./packages/pi-caffeinate/) | Extension | Keep the computer awake while an agent run is active |
 | [engineering-discipline](./skills/engineering-discipline/) | Skill | Coding philosophy for non-trivial work |

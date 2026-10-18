@@ -1,4 +1,5 @@
 node_modules/
+packages/pi-dynamic-workflows/dist/
 *.log
 .DS_Store
 .vscode/
