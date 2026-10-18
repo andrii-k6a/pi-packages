@@ -19,8 +19,11 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [searxng](./skills/searxng/) | Skill | Discover sources through local SearXNG search |
 | [defuddle](./skills/defuddle/) | Skill | Read static web pages as clean Markdown |
 | [crawl4ai](./skills/crawl4ai/) | Skill | Read rendered pages and crawl sites with a local browser |
+| [assistant](./prompts/assistant.md) | Prompt | Treat the session as a general-purpose personal assistant |
 
-Each extension has its own README with setup instructions, usage, and configuration details. Skills document their usage in `SKILL.md`.
+Each extension has its own README with setup instructions, usage, and configuration details.
+Skills document their usage in `SKILL.md`.
+Prompt templates are single Markdown files in `prompts/`; the filename is the slash command.
 
 ## Install All
 
