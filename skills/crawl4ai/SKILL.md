@@ -12,8 +12,9 @@ Two ways to run it: the `crwl` CLI, or a REST server in Docker, on `127.0.0.1`, 
 - Don't start the server unless the task needs it (see Which one). If `crwl` can do the job, use it.
 - Local only. Do not use `crwl cloud` or `api.crawl4ai.com`.
 - Never print the API token or write it to a file.
-- Save output to distinct files per source. Preview large results, then read the needed sections in
-  manageable chunks. Fetching or rendering a whole page does not mean you have read all its content.
+- Save each source to its own file in a new directory made for this task (see "Work directory").
+  Read each file to its end, or say which part you did not read (see "Verify rendered content").
+  Fetching or rendering a whole page does not mean you have read all its content.
 - Always run `crwl` and `crawl4ai-*` commands with `CRAWL4AI_NO_CLOUD_NOTICE=1` to hide the Cloud promo banner.
 - During setup, work in small steps: one command, show the key output, wait.
 
@@ -37,11 +38,21 @@ CRAWL4AI_NO_CLOUD_NOTICE=1 crawl4ai-setup   # downloads the browser
 CRAWL4AI_NO_CLOUD_NOTICE=1 crawl4ai-doctor  # verify
 ```
 
+## Work directory
+Make one new directory per task and write every output file into it:
+```bash
+mktemp -d    # once per task; prints the new directory. Use that absolute path as OUT below
+```
+Never reuse a directory from an earlier task, or a fixed path such as `/tmp/research`. `-O` overwrites
+without warning, and a failed fetch can leave an old or empty file under the name, which then reads
+as a result. Shell variables may not persist between commands, so repeat the path in each command.
+
 ## CLI
 ```bash
-CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o markdown -O page.md     # raw Markdown for source verification
-CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o markdown-fit -O fit.md  # pruned preview; may omit relevant content
-CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o all -O result.json      # full result (large)
+OUT=/absolute/path/printed/by/mktemp   # the task's directory
+CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o markdown -O "$OUT/page.md"     # raw Markdown for source verification
+CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o markdown-fit -O "$OUT/fit.md"  # pruned preview; may omit relevant content
+CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o all -O "$OUT/result.json"      # full result (large)
 CRAWL4AI_NO_CLOUD_NOTICE=1 crwl --help                            # browser/crawler options, extraction, deep crawl
 ```
 Bound a slow page with `-c page_timeout=45000` (milliseconds). macOS has no `timeout` command.
@@ -58,9 +69,9 @@ empty page, and the command still succeeds. Check the size and the first lines o
 of a few hundred bytes is an error page.
 
 Try each blocked URL, not a sample, in this order. Stop at the first step that returns the article:
-1. `CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o markdown -O page.md` (the default).
+1. `CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -o markdown -O "$OUT/page.md"` (the default).
 2. Add anti-bot handling:
-   `CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -c "magic=true" -o markdown -O page.md`. This works only
+   `CRAWL4AI_NO_CLOUD_NOTICE=1 crwl "<url>" -c "magic=true" -o markdown -O "$OUT/page.md"`. This works only
    some of the time. On one strict Akamai site it returned the article in about 1 attempt in 5, and
    step 1 never did. Try up to 5 times, 5 seconds apart. Stop at the first result of several KB.
    Some sites stay denied or empty at every attempt.
@@ -75,10 +86,26 @@ Try each blocked URL, not a sample, in this order. Stop at the first step that r
 - `markdown-fit` is filtered content. If a claim depends on caveats, tables, or methods, inspect raw
   Markdown and the surrounding section. If extraction still loses them, inspect the rendered page or
   full result as needed. A successful request can still return an error page, login, or consent wall.
+- Read each page to its end. Raw Markdown starts with site navigation and ends with related links
+  and footer, and has image lines (`![alt](url)`). Remove the images, size the file, and find the
+  article by its headings; the title is usually the first `# ` line. Read from there in chunks of
+  about 100 lines with a file-read tool (offset and limit) or `sed -n`:
+  ```bash
+  grep -v '^!\[' "$OUT/page.md" > "$OUT/page.txt"
+  wc -l "$OUT/page.txt"            # size
+  grep -n '^#' "$OUT/page.txt"     # outline with line numbers
+  sed -n '14,113p' "$OUT/page.txt" # from the title line; then the next 100 lines, up to the footer
+  ```
+  Do not stop at `head`, and do not shorten lines with `cut -c`: a paragraph is one line, and its
+  qualifier is often at the end. Caveats and counter-evidence often come after the claim, so finish
+  the article before you cite a figure from it. You may skip navigation, footer, related links,
+  comments, or a section you can name as irrelevant.
 - Keep the URL and available source dates with the relevant passage. Distinguish the article date
   from the data period and retrieval date. Check statistics against their definitions and population.
-- Report remaining access or extraction gaps and which sections you inspected; do not describe a
-  preview or filtered output as a full read.
+- Report remaining access or extraction gaps and which sections you inspected, with line ranges:
+  "read lines 14-52 of 71 (article body)", or "partial: lines 14-60 of 120". Do not describe a
+  preview or filtered output as a full read, and do not present a partial read as the article's
+  full position.
 
 ## REST server
 Needs Docker and a token. Without a token the server is unreachable. Always bind to loopback.
@@ -101,7 +128,7 @@ docker run -d -p 127.0.0.1:11235:11235 --name crawl4ai --shm-size=1g \
 **Call** (`/health` needs no auth, everything else needs the Bearer token):
 ```bash
 curl -fsS http://127.0.0.1:11235/md -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"url": "<url>"}' -o resp.json
+  -H "Content-Type: application/json" -d '{"url": "<url>"}' -o "$OUT/resp.json"
 ```
 Check `success` before using the response's `markdown`; an HTTP 200 alone does not prove the crawl succeeded.
 Other endpoints: `/crawl`, `/html`, `/screenshot`, `/pdf`, `/execute_js`. Request formats: https://docs.crawl4ai.com/core/self-hosting/
