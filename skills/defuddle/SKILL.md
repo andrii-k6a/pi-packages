@@ -41,16 +41,22 @@ The title is not in the body by default. Use `-f` or `-p title` to get it.
 Image lines (`![alt](url)`) can be 10-30% of the output. Remove them before you read:
 `grep -v '^!\[' page.md > page.txt`.
 
-For several URLs, print one status line per URL. This keeps each failure tied to its URL:
+For several URLs, print one status line per URL. This keeps each failure tied to its URL. Pause
+only before a repeat request to a host already fetched in the loop; a first request to a host needs
+no pause, and a pause does not clear a block (403, 429):
 ```bash
+seen=" "
 while read -r name url; do   # one "name url" pair per line
+  host=${url#*://}; host=${host%%/*}
+  case "$seen" in *" $host "*) sleep 2 ;; esac
+  seen="$seen$host "
   if defuddle parse "$url" --md -f -o "$name.md" >/dev/null 2>"$name.err"; then
     echo "$name ok $(wc -w <"$name.md")w"
   else echo "$name FAIL $(head -1 "$name.err")"; fi
-  sleep 2
 done <<'EOF'
 source-a https://example.com/a
-source-b https://example.com/b
+source-b https://example.org/b
+source-c https://example.com/c
 EOF
 ```
 
