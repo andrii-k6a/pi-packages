@@ -1,13 +1,26 @@
 import type { JsonValue } from '@earendil-works/chord';
 import type { Usage } from '@earendil-works/pi-ai';
-import type { ConversationView, EntryRecord, LiveState } from '@earendil-works/pi-durable';
+import type {
+  ConversationView,
+  EntryRecord,
+  InboxState,
+  LiveState,
+  SubmissionId
+} from '@earendil-works/pi-durable';
 import { addUsage, emptyUsage } from '../shared/usage.js';
 import type {
   WorkflowAgentSnapshot,
   WorkflowRunDisplayStatus,
   WorkflowSnapshot
 } from '../workflow/snapshot.js';
-import type { WorkflowAgentRow, WorkflowAttemptState, WorkflowRunState } from './docs.js';
+import {
+  CANCELLED_ENTRY,
+  PAUSED_ENTRY,
+  RESUMED_ENTRY,
+  type WorkflowAgentRow,
+  type WorkflowAttemptState,
+  type WorkflowRunState
+} from './docs.js';
 import type { WorkflowRunIndex } from './store.js';
 
 /** Everything the inspector shows about one run, read from its durable Session. */
@@ -36,10 +49,21 @@ export type WorkflowTranscriptItem = {
   isError?: boolean;
   /** A tool call whose result is still being produced. */
   running?: boolean;
+  /** A message the agent has not read yet. */
+  queued?: boolean;
 };
 
-/** A subagent conversation being followed: its transcript so far, and whether it is working. */
-export type FollowedTranscript = { items: WorkflowTranscriptItem[]; busy: boolean };
+/**
+ * A subagent conversation being followed: its transcript so far, whether it is working, whether
+ * the user paused it, and how many steers wait for the agent to read them.
+ */
+export type FollowedTranscript = {
+  items: WorkflowTranscriptItem[];
+  busy: boolean;
+  queued: number;
+  /** The user stopped the agent and it waits to be resumed. */
+  paused: boolean;
+};
 
 /** Agent rows in display order. */
 export function attemptRows(attempt: Pick<WorkflowAttemptState, 'agents'>): WorkflowAgentRow[] {
@@ -72,11 +96,13 @@ export function attemptSnapshot(
       ...(row.startedAt !== undefined ? { durationMs: (row.endedAt ?? now) - row.startedAt } : {}),
       ...(rowUsage?.totalTokens ? { tokens: rowUsage.totalTokens } : {}),
       ...(rowUsage?.cost?.total ? { cost: rowUsage.cost.total } : {}),
-      ...(row.status === 'running' && current?.state
-        ? { activity: liveActivity(current.state) ?? 'working' }
-        : row.status === 'running'
-          ? { activity: 'starting' }
-          : {}),
+      ...(row.paused
+        ? { activity: 'paused' }
+        : row.status === 'running' && current?.state
+          ? { activity: liveActivity(current.state) ?? 'working' }
+          : row.status === 'running'
+            ? { activity: 'starting' }
+            : {}),
       ...(current?.state?.compactionFailure
         ? { warning: `compaction failed: ${current.state.compactionFailure.error}` }
         : {}),
@@ -183,6 +209,15 @@ export function transcriptItems(entries: readonly EntryRecord[]): WorkflowTransc
           });
         }
         break;
+      case PAUSED_ENTRY:
+        items.push({ role: 'note', text: '⏸ paused' });
+        break;
+      case RESUMED_ENTRY:
+        items.push({ role: 'note', text: '▶ resumed' });
+        break;
+      case CANCELLED_ENTRY:
+        items.push({ role: 'note', text: '✗ cancelled' });
+        break;
       default:
         items.push({ role: 'note', text: `[${entry.kind}]` });
     }
@@ -221,7 +256,7 @@ function assistantItems(message: unknown): WorkflowTranscriptItem[] {
   return items;
 }
 
-/** The committed transcript of a conversation plus the reply and tool output still in flight. */
+/** The committed transcript of a conversation plus the reply, tool output, and steers still in flight. */
 export function followedTranscript(
   view: Pick<ConversationView, 'entries' | 'docs'>
 ): FollowedTranscript {
@@ -232,7 +267,26 @@ export function followedTranscript(
     if (tool.status === 'running' && tool.output)
       items.push({ role: 'tool-result', toolName: tool.name, text: tool.output, running: true });
   }
-  return { items, busy: live?.run !== undefined };
+  const queued = queuedSteers(view.docs['pi.inbox'] as InboxState | undefined);
+  for (const { text } of queued) items.push({ role: 'user', text, queued: true });
+  const lastMarker = view.entries
+    .filter((entry) => [PAUSED_ENTRY, RESUMED_ENTRY, CANCELLED_ENTRY].includes(entry.kind))
+    .at(-1);
+  return {
+    items,
+    busy: live?.run !== undefined,
+    queued: queued.length,
+    paused: lastMarker?.kind === PAUSED_ENTRY
+  };
+}
+
+/** Steers a running subagent has not read yet, oldest first. */
+export function queuedSteers(
+  inbox: InboxState | undefined
+): Array<{ id: SubmissionId; text: string }> {
+  return (inbox?.items ?? []).flatMap((item) =>
+    item.mode === 'steer' ? [{ id: item.id, text: contentText(item.content) }] : []
+  );
 }
 
 /** Listing summary of a run, derived from its latest attempt. */

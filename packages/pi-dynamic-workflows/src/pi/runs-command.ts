@@ -1,11 +1,15 @@
 import { writeFileSync } from 'node:fs';
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  KeybindingsManager,
+  Theme
+} from '@earendil-works/pi-coding-agent';
 import {
   type Focusable,
   Input,
   Key,
   type Keybinding,
-  type KeybindingsManager,
   matchesKey,
   type TUI,
   type TuiMouseEvent,
@@ -31,6 +35,10 @@ import { resolveEditorCommand, viewInExternalEditor } from './external-editor.js
 
 /** Lines a page scroll keeps from the previous page, as in Pi's fullscreen viewport. */
 const PAGE_SCROLL_OVERLAP = 4;
+/** Rows the inspector leaves at the bottom of the screen: the latest messages, editor, and status. */
+const PARENT_ROWS = 14;
+/** Fewest rows the inspector uses, however small the terminal. */
+const MIN_ROWS = 18;
 
 const STATUS_ICONS: Record<string, string> = {
   running: '●',
@@ -70,7 +78,8 @@ export async function openWorkflowRuns(
       ),
     // Fullscreen mode handles the user's `tui.altScreen.*` scroll keys before the focused
     // component, except while an overlay has focus. Without the overlay they never reach the view.
-    { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', anchor: 'bottom-left' } }
+    // Anchored at the top, so the parent session's latest messages stay readable below it.
+    { overlay: true, overlayOptions: { width: '100%', anchor: 'top-left' } }
   );
   if (result?.resume) {
     const message = resumeInstruction(result.resume);
@@ -155,7 +164,14 @@ type BrowserMode =
       prompts?: number[];
       back: Extract<BrowserMode, { kind: 'detail' }>;
       /** Present while the agent runs in this session: the transcript streams and can be steered. */
-      live?: { busy: boolean; pinned: boolean; stop?: () => void };
+      live?: {
+        busy: boolean;
+        pinned: boolean;
+        queued: number;
+        /** The user stopped the agent; it waits to be resumed. */
+        paused: boolean;
+        stop?: () => void;
+      };
     };
 
 export class WorkflowRunsBrowser implements Focusable {
@@ -254,7 +270,8 @@ export class WorkflowRunsBrowser implements Focusable {
   }
 
   #bodyHeight(): number {
-    return Math.max(3, this.#rows() - 6);
+    const rows = this.#rows();
+    return Math.max(3, Math.min(rows, Math.max(MIN_ROWS, rows - PARENT_ROWS)) - 6);
   }
 
   #rows(): number {
@@ -268,7 +285,7 @@ export class WorkflowRunsBrowser implements Focusable {
         ? `${mode.runs.length} run(s)`
         : mode.kind === 'detail'
           ? mode.runId
-          : `${mode.runId} · ${mode.title}${mode.live ? (mode.live.busy ? ' · ● live' : ' · finished') : ''}`;
+          : `${mode.runId} · ${mode.title}${mode.live ? (mode.live.paused ? ' · ⏸ paused' : mode.live.busy ? ' · ● live' : ' · finished') : ''}`;
     return `${this.theme.fg('accent', ` ${this.theme.bold('/workflows')}`)}${this.theme.fg('muted', ` · ${sanitize(label)}`)}`;
   }
 
@@ -295,13 +312,20 @@ export class WorkflowRunsBrowser implements Focusable {
         : `${a}/${b} ${label}`;
     };
     const live = this.#mode.kind === 'transcript' && this.#mode.live;
-    // Esc first: a narrow terminal cuts the end of the line, and the way out must stay visible.
+    const [dequeueKey] = this.keybindings.getKeys('app.message.dequeue');
+    // What the user can do comes first: a narrow terminal cuts the end of the line, and the scroll
+    // keys are the ones they already know from the parent session.
     return ` ${[
       'Esc back',
+      ...(live && live.queued > 0 && dequeueKey ? [`${dequeueKey} edit queued`] : []),
+      ...(live
+        ? live.paused
+          ? ['p resume', 'm send & resume', 'x cancel agent']
+          : ['p pause', 'm steer', 'x cancel agent']
+        : []),
       '↑/↓ scroll',
       pair('tui.altScreen.pageUp', 'tui.altScreen.pageDown', 'page'),
       pair('tui.altScreen.top', 'tui.altScreen.bottom', 'top/bottom'),
-      ...(live ? ['m steer', 'x cancel agent'] : []),
       'e editor'
     ]
       .filter(Boolean)
@@ -456,7 +480,7 @@ export class WorkflowRunsBrowser implements Focusable {
         offset: 0,
         back: mode,
         ...(row.status === 'running' && this.host.isActive(mode.runId)
-          ? { live: { busy: true, pinned: true } }
+          ? { live: { busy: true, pinned: true, queued: 0, paused: row.paused === true } }
           : {})
       };
       this.#mode = transcript;
@@ -480,9 +504,9 @@ export class WorkflowRunsBrowser implements Focusable {
   /** Stream the transcript; if the agent can no longer be followed, show it as a snapshot. */
   #follow(transcript: Extract<BrowserMode, { kind: 'transcript' }>): void {
     void this.host
-      .follow(transcript.runId, transcript.conversationId, ({ items, busy }) => {
+      .follow(transcript.runId, transcript.conversationId, ({ items, busy, queued, paused }) => {
         transcript.items = items;
-        if (transcript.live) transcript.live.busy = busy;
+        if (transcript.live) Object.assign(transcript.live, { busy, queued, paused });
         this.#refresh();
       })
       .then((stop) => {
@@ -508,15 +532,23 @@ export class WorkflowRunsBrowser implements Focusable {
       return;
     }
     if (matchesKey(data, 'x')) {
-      if (!mode.live?.busy) {
+      if (!mode.live?.busy && !mode.live?.paused) {
         this.#notify('Only a running agent can be cancelled.');
         return;
       }
       void this.#cancelAgent(mode.runId, mode.conversationId, mode.title);
       return;
     }
+    if (matchesKey(data, 'p')) {
+      void this.#togglePause(mode);
+      return;
+    }
     if (matchesKey(data, 'e')) {
       void this.#openInEditor(mode);
+      return;
+    }
+    if (this.keybindings.matches(data, 'app.message.dequeue')) {
+      void this.#dequeue(mode);
       return;
     }
     const scroll = this.#scrollRequest(data);
@@ -572,21 +604,23 @@ export class WorkflowRunsBrowser implements Focusable {
     return undefined;
   }
 
-  #startCompose(mode: Extract<BrowserMode, { kind: 'transcript' }>): void {
+  #startCompose(mode: Extract<BrowserMode, { kind: 'transcript' }>, restored?: string): void {
     if (!mode.live) {
       this.#notify('Only an agent running in this session can be steered.');
       return;
     }
-    if (!mode.live.busy) {
+    if (!mode.live.busy && !mode.live.paused && restored === undefined) {
       this.#notify('This agent is not working right now.');
       return;
     }
-    const input = new Input();
+    const input = new Input({ prompt: '' });
     input.focused = this.#focused;
+    // A paste puts the cursor after the restored text, where editing continues.
+    if (restored) input.handleInput(`\u001b[200~${terminalInput(restored)}\u001b[201~`);
     input.onSubmit = (value) => {
       this.#compose = undefined;
       const text = terminalInput(value).trim();
-      if (text) void this.#steer(mode, text);
+      if (text) void this.#send(mode, text);
     };
     input.onEscape = () => {
       this.#compose = undefined;
@@ -595,10 +629,57 @@ export class WorkflowRunsBrowser implements Focusable {
     this.#refresh();
   }
 
-  async #steer(mode: Extract<BrowserMode, { kind: 'transcript' }>, text: string): Promise<void> {
+  /** Like Pi's dequeue: queued messages go back into the input to edit, send again, or discard. */
+  async #dequeue(mode: Extract<BrowserMode, { kind: 'transcript' }>): Promise<void> {
+    if (!mode.live) {
+      this.#notify('Only an agent running in this session has queued messages.');
+      return;
+    }
     try {
-      await this.host.steer(mode.runId, mode.conversationId, text);
-      this.#notify('Sent. The agent reads it after its current tool round.');
+      const withdrawn = await this.host.withdrawSteers(mode.runId, mode.conversationId);
+      if (withdrawn.length === 0) this.#notify('Nothing queued: the agent has read your messages.');
+      else this.#startCompose(mode, withdrawn.join(' '));
+    } catch (error) {
+      this.#notify(errorText(error), 'error');
+    }
+  }
+
+  /** A message to a working agent is a steer. To a paused agent it also resumes it. */
+  async #send(mode: Extract<BrowserMode, { kind: 'transcript' }>, text: string): Promise<void> {
+    try {
+      if (mode.live?.paused) {
+        await this.host.resumeAgent(mode.runId, mode.conversationId, text);
+        this.#notify('Sent. The agent carries on with your message.');
+      } else {
+        await this.host.steer(mode.runId, mode.conversationId, text);
+        this.#notify('Sent. The agent reads it after its current tool round.');
+      }
+    } catch (error) {
+      this.#notify(errorText(error), 'error');
+    }
+  }
+
+  /** Like Esc in Pi: interrupt now and hold the agent. Pressing again resumes without a message. */
+  async #togglePause(mode: Extract<BrowserMode, { kind: 'transcript' }>): Promise<void> {
+    if (!mode.live) {
+      this.#notify('Only an agent running in this session can be paused.');
+      return;
+    }
+    try {
+      if (mode.live.paused) {
+        await this.host.resumeAgent(mode.runId, mode.conversationId);
+        this.#notify('Resumed.');
+        return;
+      }
+      const { paused, withdrawn } = await this.host.pauseAgent(mode.runId, mode.conversationId);
+      if (!paused) {
+        this.#notify('The agent finished its step before it could be paused.');
+        return;
+      }
+      mode.live.paused = true;
+      // The interrupt withdrew queued steers: edit and send them, or discard with Esc.
+      if (withdrawn.length > 0) this.#startCompose(mode, withdrawn.join(' '));
+      else this.#notify('Paused. Press m to send a message and resume, or p to resume.');
     } catch (error) {
       this.#notify(errorText(error), 'error');
     }
@@ -780,7 +861,8 @@ function agentDetailLine(row: WorkflowAgentRow, now: number): string {
     row.usage?.cost?.total ? formatCost(row.usage.cost.total) : undefined,
     row.profile ? `profile ${sanitize(row.profile)}` : undefined
   ].filter(Boolean);
-  const icon = row.reusedFrom !== undefined ? '↺' : (STATUS_ICONS[row.status] ?? '?');
+  const icon =
+    row.reusedFrom !== undefined ? '↺' : row.paused ? '⏸' : (STATUS_ICONS[row.status] ?? '?');
   return `#${row.index} ${icon} ${sanitize(row.label)}${facts.length ? ` · ${facts.join(' · ')}` : ''}`;
 }
 
@@ -831,7 +913,9 @@ function itemLabel(item: WorkflowTranscriptItem): string {
       ? `→ ${item.toolName ?? 'tool'}`
       : item.role === 'tool-result'
         ? `← ${item.toolName ?? 'tool'}${item.running ? ' (running)' : ''}${item.isError ? ' (error)' : ''}`
-        : item.role;
+        : item.role === 'user' && item.queued
+          ? 'user (queued)'
+          : item.role;
   return sanitize(label);
 }
 

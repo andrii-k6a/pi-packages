@@ -14,11 +14,15 @@ import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { emptyUsage, sumUsageState } from '../../shared/usage.js';
 import { preview } from '../../workflow/snapshot.js';
 import {
+  CANCELLED_ENTRY,
+  PAUSED_ENTRY,
+  RESUMED_ENTRY,
   type StoredUsage,
   type WorkflowAgentRow,
   WorkflowAttemptDoc,
   type WorkflowAttemptState,
-  WorkflowOutputDoc
+  WorkflowOutputDoc,
+  WorkflowPauseDoc
 } from '../docs.js';
 import { createSubagentExtension, STRUCTURED_OUTPUT_NUDGE } from '../subagent.js';
 import {
@@ -30,6 +34,11 @@ import {
   type WorkflowTaskServices
 } from './contracts.js';
 import { outcomeMessage } from './outcome.js';
+
+/** How often a paused agent checks whether the user has resumed it. */
+const PAUSE_POLL_MS = 250;
+/** Sent when the user resumes an agent without a message. */
+export const CONTINUE_MESSAGE = 'Continue.';
 
 /** Shared by every subagent conversation; selected by name in each conversation's agent. */
 export const SubagentExtension = createSubagentExtension();
@@ -98,7 +107,7 @@ export function createAgentTask(
       // re-enters here and reattaches to the same submission; generation resumes on its own.
       run: async (task, runtime, context) => {
         const input = task.input;
-        const { conversationId, nudges } = task.state.checkpoint;
+        const { conversationId, nudges, turn = 0, message } = task.state.checkpoint;
         const id = conversationId as ConversationId;
         const handle = await runtime.conversation(id, context);
         if (!handle) {
@@ -110,11 +119,33 @@ export function createAgentTask(
           return;
         }
         const requestId =
-          nudges === 0 ? `workflow.agent:${task.id}` : `workflow.agent:${task.id}:nudge:${nudges}`;
-        const content = nudges === 0 ? input.prompt : STRUCTURED_OUTPUT_NUDGE;
+          message !== undefined
+            ? `workflow.agent:${task.id}:resume:${turn}`
+            : nudges === 0
+              ? `workflow.agent:${task.id}`
+              : `workflow.agent:${task.id}:nudge:${nudges}`;
+        const content = message ?? (nudges === 0 ? input.prompt : STRUCTURED_OUTPUT_NUDGE);
         const submission = await handle.submit({ type: 'input', content, requestId }, context);
         const settled = await submission.wait(context);
         const usage = sumUsageState(await runtime.snapshot(UsageDoc, id, context)) as StoredUsage;
+
+        // The user interrupted the agent to pause it: keep the call pending instead of failing it.
+        if (
+          settled.status === 'unanswered' &&
+          settled.reason === 'aborted' &&
+          (await runtime.snapshot(WorkflowPauseDoc, id, context))?.paused
+        ) {
+          await runtime.commit(async (tx) => {
+            const row = await agentRow(tx, input, runtime.now());
+            if (row) row.paused = true;
+            await tx.appendEntry(id, { kind: PAUSED_ENTRY, data: {} });
+            return {
+              status: 'running',
+              checkpoint: { phase: 'paused', conversationId, nudges, turn }
+            };
+          }, context);
+          return;
+        }
 
         if (settled.status !== 'done' || settled.type !== 'input') {
           const reason = settled.status === 'unanswered' ? settled.reason : settled.status;
@@ -135,7 +166,12 @@ export function createAgentTask(
               await runtime.commit(
                 () => ({
                   status: 'running',
-                  checkpoint: { phase: 'run', conversationId, nudges: nudges + 1 }
+                  checkpoint: {
+                    phase: 'run',
+                    conversationId,
+                    nudges: nudges + 1,
+                    ...(turn ? { turn } : {})
+                  }
                 }),
                 context
               );
@@ -172,13 +208,47 @@ export function createAgentTask(
           status: 'completed',
           result: { value, usage, conversationId }
         });
+      },
+      paused: async (task, runtime, context) => {
+        const input = task.input;
+        const { conversationId, nudges, turn } = task.state.checkpoint;
+        const id = conversationId as ConversationId;
+        let state = await runtime.snapshot(WorkflowPauseDoc, id, context);
+        while (state?.paused) {
+          await sleep(PAUSE_POLL_MS, runtime.signal);
+          if (runtime.signal.aborted) return;
+          state = await runtime.snapshot(WorkflowPauseDoc, id, context);
+        }
+        if (state?.cancelled) {
+          await runtime.commit(async (tx) => {
+            await tx.appendEntry(id, { kind: CANCELLED_ENTRY, data: {} });
+            return undefined;
+          }, context);
+          const usage = sumUsageState(await runtime.snapshot(UsageDoc, id, context)) as StoredUsage;
+          await finishAgent(runtime, task, context, {
+            status: 'failed',
+            error: { message: 'subagent was cancelled' },
+            result: { value: null, usage, conversationId }
+          });
+          return;
+        }
+        const message = state?.message || CONTINUE_MESSAGE;
+        await runtime.commit(async (tx) => {
+          const row = await agentRow(tx, input, runtime.now());
+          if (row) delete row.paused;
+          await tx.appendEntry(id, { kind: RESUMED_ENTRY, data: {} });
+          return {
+            status: 'running',
+            checkpoint: { phase: 'run', conversationId, nudges, turn: turn + 1, message }
+          };
+        }, context);
       }
     },
     // Runs after the subagent's conversation work has been aborted (bottom-up).
     abort: async (task, runtime, context) => {
       const checkpoint = task.state.checkpoint;
       const usage =
-        checkpoint.phase === 'run'
+        checkpoint.phase !== 'start'
           ? (sumUsageState(
               await runtime.snapshot(UsageDoc, checkpoint.conversationId as ConversationId, context)
             ) as StoredUsage)
@@ -189,7 +259,7 @@ export function createAgentTask(
         result: {
           value: null,
           usage,
-          ...(checkpoint.phase === 'run' ? { conversationId: checkpoint.conversationId } : {})
+          ...(checkpoint.phase !== 'start' ? { conversationId: checkpoint.conversationId } : {})
         }
       });
     }
@@ -214,6 +284,7 @@ async function finishAgent(
     const row = await agentRow(tx, task.input, endedAt);
     if (row) {
       row.endedAt = endedAt;
+      delete row.paused;
       if (outcome.result) row.usage = outcome.result.usage;
       if (outcome.result?.conversationId !== undefined)
         row.conversationId = outcome.result.conversationId;
@@ -270,4 +341,17 @@ function detailText(settled: { detail?: JsonValue }): string {
   if (settled.detail === undefined || settled.detail === null) return '';
   const text = typeof settled.detail === 'string' ? settled.detail : JSON.stringify(settled.detail);
   return text ? ` (${text.length > 400 ? `${text.slice(0, 399)}…` : text})` : '';
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }

@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import type { EntryRecord, LiveState, ToolRegistration } from '@earendil-works/pi-durable';
+import type {
+  EntryRecord,
+  JsonObject,
+  LiveState,
+  ToolRegistration
+} from '@earendil-works/pi-durable';
 import { test } from 'vitest';
 import type { WorkflowAttemptState } from '../../src/durable/docs.js';
 import {
@@ -280,6 +285,8 @@ test('followedTranscript appends the reply and tool output still in flight', () 
 
   assert.deepEqual(followedTranscript({ entries, docs: { 'pi.live': live } }), {
     busy: true,
+    queued: 0,
+    paused: false,
     items: [
       { role: 'user', text: 'do it' },
       { role: 'assistant', text: 'Running tests' },
@@ -288,7 +295,34 @@ test('followedTranscript appends the reply and tool output still in flight', () 
   });
   assert.deepEqual(followedTranscript({ entries, docs: {} }), {
     busy: false,
+    queued: 0,
+    paused: false,
     items: [{ role: 'user', text: 'do it' }]
+  });
+});
+
+test('followedTranscript shows queued steers last, and ignores follow-ups and writes', () => {
+  const entries = [
+    { id: 1, conversationId: 2, kind: 'pi.user', model: [{ role: 'user', content: 'do it' }] }
+  ] as unknown as EntryRecord[];
+  const inbox = {
+    items: [
+      { id: 5, mode: 'steer', content: 'Use pnpm' },
+      { id: 6, mode: 'followUp', content: 'Later' },
+      { id: 7, mode: 'write', entry: { kind: 'app.note' } },
+      { id: 8, mode: 'steer', content: [{ type: 'text', text: 'And skip tests' }] }
+    ]
+  } as unknown as JsonObject;
+
+  assert.deepEqual(followedTranscript({ entries, docs: { 'pi.inbox': inbox } }), {
+    busy: false,
+    queued: 2,
+    paused: false,
+    items: [
+      { role: 'user', text: 'do it' },
+      { role: 'user', text: 'Use pnpm', queued: true },
+      { role: 'user', text: 'And skip tests', queued: true }
+    ]
   });
 });
 
@@ -421,4 +455,56 @@ test('subagents replay interrupted reads but never writes, edits, or shell comma
   assert.ok(wrap && 'wrap' in wrap);
   assert.equal((wrap.wrap(tools.read as never) as ToolRegistration).replay, 'safe');
   for (const name of ['write', 'edit', 'bash']) assert.notEqual(tools[name].replay, 'safe');
+});
+
+test('followedTranscript tells whether the user paused the agent from its latest marker', () => {
+  const marker = (id: number, kind: string) =>
+    ({ id, conversationId: 2, kind, data: {} }) as unknown as EntryRecord;
+  const paused = [marker(1, 'workflow.paused')];
+  const state = (entries: EntryRecord[]) => followedTranscript({ entries, docs: {} });
+
+  assert.equal(state(paused).paused, true);
+  assert.deepEqual(
+    state([...paused, marker(2, 'workflow.resumed'), marker(3, 'workflow.paused')]).paused,
+    true
+  );
+  assert.equal(state([...paused, marker(2, 'workflow.resumed')]).paused, false);
+  assert.equal(state([...paused, marker(2, 'workflow.cancelled')]).paused, false);
+  assert.equal(state([]).paused, false);
+  assert.deepEqual(
+    transcriptItems([...paused, marker(2, 'workflow.resumed'), marker(3, 'workflow.cancelled')]),
+    [
+      { role: 'note', text: '⏸ paused' },
+      { role: 'note', text: '▶ resumed' },
+      { role: 'note', text: '✗ cancelled' }
+    ]
+  );
+});
+
+test('attemptSnapshot shows a paused agent as paused whatever its live state says', () => {
+  const running = {
+    key: 'a',
+    index: 1,
+    label: 'worker',
+    status: 'running' as const,
+    prompt: 'p',
+    conversationId: 7,
+    paused: true
+  };
+  const snapshot = attemptSnapshot(
+    { runId: 'r', name: 'n', description: 'd' },
+    attempt({ agents: { a: running } }),
+    1000,
+    new Map([
+      [
+        7,
+        {
+          state: {
+            generation: { attempt: 1, message: { role: 'assistant', content: [] } }
+          } as unknown as LiveState
+        }
+      ]
+    ])
+  );
+  assert.equal(snapshot.agents[0].activity, 'paused');
 });

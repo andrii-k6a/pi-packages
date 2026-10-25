@@ -11,6 +11,8 @@ import {
   type Extension,
   Harness,
   type HarnessSettings,
+  InboxDoc,
+  type InboxState,
   LiveDoc,
   SessionFailed,
   type TaskId,
@@ -35,6 +37,8 @@ import {
   type StoredUsage,
   WorkflowAttemptDoc,
   type WorkflowAttemptState,
+  WorkflowPauseDoc,
+  type WorkflowPauseState,
   WorkflowPromptContextDoc,
   type WorkflowPromptContextState,
   type WorkflowRoute,
@@ -48,6 +52,7 @@ import {
   attemptSnapshot,
   type FollowedTranscript,
   followedTranscript,
+  queuedSteers,
   runIndex,
   transcriptItems,
   type WorkflowAttemptReport,
@@ -90,6 +95,8 @@ const context = BACKGROUND_CONTEXT;
 export const DEFAULT_MAX_AGENTS = 500;
 /** Longest transcript the inspector loads, in entries. */
 const MAX_TRANSCRIPT_ENTRIES = 5000;
+/** How long `pauseAgent` waits for the agent task to record the pause, in 25 ms steps. */
+const PAUSE_SETTLE_STEPS = 120;
 /** A finished agent's live state is not read again once it was read this long after it ended. */
 const LIVE_SETTLE_MS = 5000;
 
@@ -545,10 +552,82 @@ export class WorkflowHost {
     await conversation.submit({ type: 'input', content: message, whenBusy: 'steer' }, context);
   }
 
-  /** Stop one running subagent. Its `agent()` call fails (null in the script); the run continues. */
-  async cancelAgent(runId: string, conversationId: number): Promise<void> {
-    const { conversation } = await this.#subagent(runId, conversationId);
+  /** Take back the steers a running subagent has not read yet. Returns their text, oldest first. */
+  async withdrawSteers(runId: string, conversationId: number): Promise<string[]> {
+    const { open } = await this.#subagent(runId, conversationId);
+    const inbox = await open.harness.snapshot(InboxDoc, conversationId as never, context);
+    const withdrawn: string[] = [];
+    for (const { id, text } of queuedSteers(inbox as InboxState | undefined)) {
+      const result = await open.harness.abortSubmission(id, context, conversationId as never);
+      if (result === 'aborted') withdrawn.push(text);
+    }
+    return withdrawn;
+  }
+
+  /**
+   * Interrupt a running subagent, like Esc in Pi, and hold it. Its `agent()` call stays pending until
+   * `resumeAgent` or `cancelAgent`. Returns the steers the interrupt withdrew, so they are not lost.
+   */
+  async pauseAgent(
+    runId: string,
+    conversationId: number
+  ): Promise<{ paused: boolean; withdrawn: string[] }> {
+    const { open, conversation } = await this.#subagent(runId, conversationId);
+    const live = await open.harness.snapshot(LiveDoc, conversationId as never, context);
+    if (!live?.run) throw new Error('this agent is not working right now');
+    const inbox = await open.harness.snapshot(InboxDoc, conversationId as never, context);
+    const withdrawn = queuedSteers(inbox as InboxState | undefined).map(({ text }) => text);
+    await this.#setPause(open, conversationId, { paused: true, cancelled: false, message: '' });
     await conversation.abort(context);
+    // The agent task records the pause once the interrupt has settled. If the agent answered first,
+    // the request has no effect and the caller learns that nothing was paused.
+    for (let step = 0; step < PAUSE_SETTLE_STEPS; step++) {
+      if ((await this.#agentRow(open, conversationId))?.paused) return { paused: true, withdrawn };
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return { paused: false, withdrawn };
+  }
+
+  /** Resume a paused subagent with `message`, or with a plain "Continue." when there is none. */
+  async resumeAgent(runId: string, conversationId: number, message?: string): Promise<void> {
+    const { open, row } = await this.#subagent(runId, conversationId);
+    if (!row.paused) throw new Error('this agent is not paused');
+    await this.#setPause(open, conversationId, {
+      paused: false,
+      cancelled: false,
+      message: message?.trim() ?? ''
+    });
+  }
+
+  /** Stop one running or paused subagent. Its `agent()` call fails (null in the script); the run continues. */
+  async cancelAgent(runId: string, conversationId: number): Promise<void> {
+    const { open, conversation, row } = await this.#subagent(runId, conversationId);
+    if (row.paused) {
+      await this.#setPause(open, conversationId, { paused: false, cancelled: true, message: '' });
+      return;
+    }
+    // A pause request that never took effect must not turn this interrupt into a pause.
+    const pending = await open.harness.snapshot(WorkflowPauseDoc, conversationId as never, context);
+    if (pending?.paused) {
+      await this.#setPause(open, conversationId, { paused: false, cancelled: false, message: '' });
+    }
+    await conversation.abort(context);
+  }
+
+  async #setPause(open: OpenRun, conversationId: number, next: WorkflowPauseState): Promise<void> {
+    await open.harness.commit(async (tx) => {
+      const state = await tx.doc(WorkflowPauseDoc, conversationId as never);
+      Object.assign(state, next);
+    }, context);
+  }
+
+  async #agentRow(open: OpenRun, conversationId: number) {
+    const run = await readRun(open.harness);
+    const latest = run.attempts.at(-1);
+    const attempt = latest === undefined ? undefined : await readAttempt(open.harness, latest);
+    return Object.values(attempt?.agents ?? {}).find(
+      (candidate) => candidate.conversationId === conversationId
+    );
   }
 
   /** The conversation of a subagent that is running in a run this process drives. */
@@ -556,16 +635,11 @@ export class WorkflowHost {
     assertValidRunId(runId);
     const open = this.#open.get(runId);
     if (!open) throw new Error(`workflow run ${runId} is not running in this session`);
-    const run = await readRun(open.harness);
-    const latest = run.attempts.at(-1);
-    const attempt = latest === undefined ? undefined : await readAttempt(open.harness, latest);
-    const row = Object.values(attempt?.agents ?? {}).find(
-      (candidate) => candidate.conversationId === conversationId
-    );
+    const row = await this.#agentRow(open, conversationId);
     if (row?.status !== 'running') throw new Error('this agent is not running');
     const conversation = await open.harness.conversation(conversationId as never, context);
     if (!conversation) throw new Error(`conversation ${conversationId} not found in run ${runId}`);
-    return { open, conversation };
+    return { open, conversation, row };
   }
 
   delete(runId: string): void {

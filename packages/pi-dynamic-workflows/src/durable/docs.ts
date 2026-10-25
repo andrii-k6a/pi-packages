@@ -91,6 +91,8 @@ export type WorkflowAgentRow = {
   usage?: StoredUsage;
   preview?: string;
   error?: string;
+  /** The user stopped the agent; its `agent()` call waits until they resume or cancel it. */
+  paused?: boolean;
 };
 
 /** Live and historical state of one attempt (one `workflow.run` task). */
@@ -175,6 +177,30 @@ export const WorkflowOutputDoc = defineDoc<WorkflowOutputState>({
   fork: 'initial',
   initial: () => ({ set: false, value: null })
 });
+
+/** What the user asked of one running subagent. The agent task reads it to pause, resume, or stop. */
+export type WorkflowPauseState = {
+  /** Interrupt the agent and hold it until `paused` is cleared. */
+  paused: boolean;
+  /** The agent was cancelled while paused: end its `agent()` call as failed. */
+  cancelled: boolean;
+  /** Sent to the agent when it resumes; empty for a plain resume. */
+  message: string;
+};
+
+export const WorkflowPauseDoc = defineDoc<WorkflowPauseState>({
+  kind: 'workflow.pause',
+  version: 1,
+  scope: 'conversation',
+  history: 'latest',
+  fork: 'initial',
+  initial: () => ({ paused: false, cancelled: false, message: '' })
+});
+
+/** Display-only transcript entries written when a paused agent pauses, resumes, or is cancelled. */
+export const PAUSED_ENTRY = 'workflow.paused';
+export const RESUMED_ENTRY = 'workflow.resumed';
+export const CANCELLED_ENTRY = 'workflow.cancelled';
 
 /** Maximum logs kept per attempt; older lines are dropped from the durable view. */
 export const MAX_ATTEMPT_LOGS = 200;

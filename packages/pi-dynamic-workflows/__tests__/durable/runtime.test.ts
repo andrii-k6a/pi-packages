@@ -1132,3 +1132,201 @@ test('a new attempt after an abort runs a cancelled agent again and reuses compl
   assert.ok(prompts.includes('stuck'));
   assert.ok(!prompts.includes('fine'));
 });
+
+test('a queued steer is visible, can be withdrawn, and then never reaches the agent', async () => {
+  const release = gate();
+  respond(async ({ toolResults, userMessages }) => {
+    if (toolResults.length > 0)
+      return text(`finished after ${userMessages.length} user message(s)`);
+    await release.opened;
+    return fauxAssistantMessage([fauxToolCall('read', { path: 'notes.txt' })], {
+      stopReason: 'toolUse'
+    });
+  });
+  const runs = host();
+  const handle = await runs.start(
+    { script: `${AUDIT_HEADER}\nreturn await agent('work', { label: 'worker' })`, cwd },
+    binding()
+  );
+  await until(() => prompts.includes('work'));
+  const conversationId = await agentConversation(runs, handle.runId, 'worker');
+  const seen: Array<{ queued: number; queuedTexts: string[] }> = [];
+  const stop = await runs.follow(handle.runId, conversationId, ({ items, queued }) =>
+    seen.push({ queued, queuedTexts: items.filter((item) => item.queued).map((i) => i.text) })
+  );
+
+  await runs.steer(handle.runId, conversationId, 'Use pnpm');
+  await until(() => seen.at(-1)?.queued === 1);
+  assert.deepEqual(seen.at(-1)?.queuedTexts, ['Use pnpm']);
+
+  assert.deepEqual(await runs.withdrawSteers(handle.runId, conversationId), ['Use pnpm']);
+  await until(() => seen.at(-1)?.queued === 0);
+  assert.deepEqual(await runs.withdrawSteers(handle.runId, conversationId), []);
+
+  release.open();
+  const outcome = await handle.wait();
+  stop();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed')
+    assert.equal(outcome.value, 'finished after 1 user message(s)');
+  await handle.close();
+});
+
+/** The first request of an agent hangs until it is interrupted; every later one answers. */
+function respondHangingFirst() {
+  respond(async ({ userMessages, signal }) => {
+    if (userMessages.length === 1) {
+      await new Promise<never>((_, reject) =>
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      );
+    }
+    return text(`resumed with: ${userMessages.at(-1)}`);
+  });
+}
+
+async function startPausable(runs: WorkflowHost) {
+  respondHangingFirst();
+  const handle = await runs.start(
+    { script: `${AUDIT_HEADER}\nreturn await agent('work', { label: 'worker' })`, cwd },
+    binding()
+  );
+  await until(() => prompts.includes('work'));
+  const conversationId = await agentConversation(runs, handle.runId, 'worker');
+  const seen: Array<{ texts: string[]; paused: boolean }> = [];
+  const stop = await runs.follow(handle.runId, conversationId, ({ items, paused }) =>
+    seen.push({ texts: items.map((item) => item.text), paused })
+  );
+  const state = () => seen.at(-1);
+  return { handle, conversationId, stop, state };
+}
+
+const settledWithin = async (promise: Promise<unknown>, ms: number) =>
+  Promise.race([
+    promise.then(() => true),
+    new Promise<boolean>((r) => setTimeout(() => r(false), ms))
+  ]);
+
+test('a paused agent keeps its call pending and resumes with the message the user sends', async () => {
+  const runs = host();
+  const { handle, conversationId, stop, state } = await startPausable(runs);
+
+  const result = await runs.pauseAgent(handle.runId, conversationId);
+  assert.deepEqual(result, { paused: true, withdrawn: [] });
+  await until(() => state()?.paused === true);
+  assert.ok(state()?.texts.includes('⏸ paused'));
+  const row = (await runs.report(handle.runId)).attempts[0].agents;
+  assert.equal(Object.values(row)[0].paused, true);
+  assert.equal(
+    await settledWithin(handle.wait(), 400),
+    false,
+    'the run keeps waiting for the agent'
+  );
+
+  await runs.resumeAgent(handle.runId, conversationId, '  Do X instead  ');
+  const outcome = await handle.wait();
+  stop();
+
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.equal(outcome.value, 'resumed with: Do X instead');
+  await until(() => state()?.paused === false && !!state()?.texts.includes('Do X instead'));
+  const texts = state()?.texts ?? [];
+  assert.ok(texts.indexOf('⏸ paused') < texts.indexOf('▶ resumed'));
+  assert.ok(texts.indexOf('▶ resumed') < texts.indexOf('Do X instead'));
+  await assert.rejects(runs.pauseAgent(handle.runId, conversationId), /agent is not running/);
+  await handle.close();
+});
+
+test('resuming without a message sends a visible "Continue."', async () => {
+  const runs = host();
+  const { handle, conversationId, stop } = await startPausable(runs);
+  await runs.pauseAgent(handle.runId, conversationId);
+  await runs.resumeAgent(handle.runId, conversationId);
+  const outcome = await handle.wait();
+  stop();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.equal(outcome.value, 'resumed with: Continue.');
+  await handle.close();
+});
+
+test('pausing hands back the steers it withdrew, and they never reach the agent', async () => {
+  const runs = host();
+  const { handle, conversationId, stop } = await startPausable(runs);
+  await runs.steer(handle.runId, conversationId, 'queued thought');
+
+  const { withdrawn } = await runs.pauseAgent(handle.runId, conversationId);
+  assert.deepEqual(withdrawn, ['queued thought']);
+  await runs.resumeAgent(handle.runId, conversationId, 'edited thought');
+  const outcome = await handle.wait();
+  stop();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.equal(outcome.value, 'resumed with: edited thought');
+  await handle.close();
+});
+
+test('cancelling a paused agent fails its call and the run continues', async () => {
+  const runs = host();
+  const { handle, conversationId, stop } = await startPausable(runs);
+  await runs.pauseAgent(handle.runId, conversationId);
+
+  await runs.cancelAgent(handle.runId, conversationId);
+  const outcome = await handle.wait();
+  stop();
+
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status !== 'completed') return;
+  assert.equal(outcome.value, null);
+  const worker = outcome.snapshot.agents.find((agent) => agent.label === 'worker');
+  assert.equal(worker?.status, 'error');
+  assert.match(worker?.error ?? '', /cancelled/);
+  await handle.close();
+});
+
+test('aborting the run does not wait for a paused agent', async () => {
+  const runs = host();
+  const { handle, conversationId, stop } = await startPausable(runs);
+  await runs.pauseAgent(handle.runId, conversationId);
+
+  await handle.abort();
+  const outcome = await handle.wait();
+  stop();
+
+  assert.equal(outcome.status, 'aborted');
+  assert.equal(outcome.snapshot.agents[0].status, 'skipped');
+  await handle.close();
+});
+
+test('an agent stays paused when its run is closed and continued, and sends nothing until resumed', async () => {
+  const runs = host();
+  const { handle, conversationId, stop } = await startPausable(runs);
+  await runs.pauseAgent(handle.runId, conversationId);
+  stop();
+  await handle.close();
+  prompts = [];
+
+  const continued = await runs.resume(handle.runId, {}, binding());
+  assert.equal(continued.mode, 'continued');
+  await until(async () => {
+    const agents = (await runs.report(handle.runId)).attempts[0].agents;
+    return Object.values(agents)[0].paused === true;
+  });
+  assert.equal(await settledWithin(continued.wait(), 400), false);
+  assert.deepEqual(prompts, []);
+
+  await runs.resumeAgent(handle.runId, conversationId, 'carry on');
+  const outcome = await continued.wait();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.equal(outcome.value, 'resumed with: carry on');
+  await continued.close();
+});
+
+test('only a working agent can be paused, and only a paused one resumed', async () => {
+  const runs = host();
+  const { handle, conversationId, stop } = await startPausable(runs);
+  await assert.rejects(runs.resumeAgent(handle.runId, conversationId), /not paused/);
+  await runs.pauseAgent(handle.runId, conversationId);
+  await assert.rejects(runs.pauseAgent(handle.runId, conversationId), /not working right now/);
+  await runs.cancelAgent(handle.runId, conversationId);
+  await handle.wait();
+  stop();
+  await handle.close();
+});

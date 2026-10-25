@@ -64,7 +64,16 @@ export type WorkflowAgentInput = {
 
 export type AgentCheckpoint =
   | { phase: 'start' }
-  | { phase: 'run'; conversationId: number; nudges: number };
+  | {
+      phase: 'run';
+      conversationId: number;
+      nudges: number;
+      /** Times the user has resumed this agent; keeps each resume message's request ID unique. */
+      turn?: number;
+      /** Set when the agent has just resumed: the message this invocation sends. */
+      message?: string;
+    }
+  | { phase: 'paused'; conversationId: number; nudges: number; turn: number };
 
 export type WorkflowAgentTaskResult = {
   value: JsonValue;
