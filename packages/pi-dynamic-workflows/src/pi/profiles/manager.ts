@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { loadWorkflowProfiles, saveWorkflowProfiles } from '../../profiles/config.js';
-import type { WorkflowProfile } from '../../profiles/contracts.js';
+import { loadWorkflowProfileConfig, saveWorkflowProfileConfig } from '../../profiles/config.js';
+import type { WorkflowProfile, WorkflowProfileConfig } from '../../profiles/contracts.js';
 import { terminalLine } from '../../shared/terminal-text.js';
 import { activeProviderFor, selectableModels } from './choices.js';
 import { type ProfileManagerAction, WorkflowProfileList } from './list.js';
@@ -16,33 +16,33 @@ export async function openWorkflowProfileManager(
     return;
   }
 
-  let profiles: WorkflowProfile[];
+  let config: WorkflowProfileConfig;
   try {
-    profiles = loadWorkflowProfiles(agentDir);
+    config = loadWorkflowProfileConfig(agentDir);
   } catch (error) {
     ctx.ui.notify(errorMessage(error), 'error');
     return;
   }
 
   while (true) {
-    const { action, profile } = await showWorkflowProfileList(ctx, profiles);
+    const { action, profile } = await showWorkflowProfileList(ctx, config);
     if (action === 'close' || !action) return;
     if (action === 'reload') {
       await ctx.reload();
       return;
     }
 
-    const nextProfiles = await profilesForAction(action, profile, profiles, ctx);
-    if (!nextProfiles) continue;
+    const nextConfig = await configForAction(action, profile, config, ctx);
+    if (!nextConfig) continue;
 
     try {
-      saveWorkflowProfiles(nextProfiles, agentDir);
+      saveWorkflowProfileConfig(nextConfig, agentDir);
     } catch (error) {
       ctx.ui.notify(errorMessage(error), 'error');
       continue;
     }
 
-    // A profile mutation changes the tool's captured profile list, so reload before
+    // A configuration change alters the tool's captured profile list, so reload before
     // accepting another command or workflow. Never reuse ctx after reload.
     await ctx.reload();
     return;
@@ -51,12 +51,29 @@ export async function openWorkflowProfileManager(
 
 function showWorkflowProfileList(
   ctx: ExtensionCommandContext,
-  profiles: WorkflowProfile[]
+  config: WorkflowProfileConfig
 ): Promise<{ action: ProfileManagerAction; profile?: WorkflowProfile }> {
   return ctx.ui.custom(
     (tui, theme, _keybindings, done) =>
-      new WorkflowProfileList(profiles, tui, theme, (action, profile) => done({ action, profile }))
+      new WorkflowProfileList(
+        config.profiles,
+        tui,
+        theme,
+        (action, profile) => done({ action, profile }),
+        config.enabled
+      )
   );
+}
+
+async function configForAction(
+  action: ProfileManagerAction,
+  profile: WorkflowProfile | undefined,
+  config: WorkflowProfileConfig,
+  ctx: ExtensionCommandContext
+): Promise<WorkflowProfileConfig | undefined> {
+  if (action === 'toggle') return { ...config, enabled: !config.enabled };
+  const profiles = await profilesForAction(action, profile, config.profiles, ctx);
+  return profiles && { ...config, profiles };
 }
 
 async function profilesForAction(

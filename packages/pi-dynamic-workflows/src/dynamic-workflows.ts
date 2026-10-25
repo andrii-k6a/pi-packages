@@ -24,7 +24,8 @@ export default function extension(pi: ExtensionAPI) {
   const workflowTool = createWorkflowTool({ profiles: loadWorkflowProfiles(), host });
   pi.registerTool(workflowTool);
   pi.registerCommand('workflow-profiles', {
-    description: 'Create, edit, delete, and reload approved workflow routing profiles',
+    description:
+      'Create, edit, delete, enable or disable, and reload approved workflow routing profiles',
     handler: async (_args, ctx) => openWorkflowProfileManager(ctx)
   });
   pi.registerCommand('workflows', {

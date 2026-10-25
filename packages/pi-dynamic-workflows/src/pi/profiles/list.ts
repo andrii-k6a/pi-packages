@@ -3,7 +3,14 @@ import { Key, matchesKey, type TUI, truncateToWidth } from '@earendil-works/pi-t
 import type { WorkflowProfile } from '../../profiles/contracts.js';
 import { terminalInput } from '../../shared/terminal-text.js';
 
-export type ProfileManagerAction = 'edit' | 'new' | 'delete' | 'reload' | 'close' | undefined;
+export type ProfileManagerAction =
+  | 'edit'
+  | 'new'
+  | 'delete'
+  | 'toggle'
+  | 'reload'
+  | 'close'
+  | undefined;
 
 /** Returns the selected row after a list mutation, preserving a valid cursor. */
 export function selectedProfileIndex(index: number, profileCount: number): number {
@@ -31,7 +38,8 @@ export class WorkflowProfileList {
     profiles: readonly WorkflowProfile[],
     private readonly tui: TUI,
     private readonly theme: Theme,
-    private readonly onAction: (action: ProfileManagerAction, profile?: WorkflowProfile) => void
+    private readonly onAction: (action: ProfileManagerAction, profile?: WorkflowProfile) => void,
+    private readonly enabled = true
   ) {
     this.#profiles = [...profiles];
   }
@@ -49,6 +57,7 @@ export class WorkflowProfileList {
     if (matchesKey(data, Key.enter) || matchesKey(data, 'e')) action = 'edit';
     else if (matchesKey(data, 'n')) action = 'new';
     else if (matchesKey(data, 'd')) action = 'delete';
+    else if (matchesKey(data, 't')) action = 'toggle';
     else if (matchesKey(data, 'r')) action = 'reload';
     else if (matchesKey(data, 'q') || matchesKey(data, Key.escape)) action = 'close';
     else return;
@@ -62,18 +71,25 @@ export class WorkflowProfileList {
 
     this.#ensureSelectionVisible(pageSize);
     const visibleProfiles = this.#profiles.slice(this.#firstVisible, this.#firstVisible + pageSize);
-    const title = `${this.theme.fg('accent', ` ${this.theme.bold('/workflow-profiles')}`)}${this.theme.fg('muted', ` · ${this.#rangeLabel(visibleProfiles.length)}`)}`;
+    const status = this.enabled ? '' : ' · disabled';
+    const title = `${this.theme.fg('accent', ` ${this.theme.bold('/workflow-profiles')}`)}${this.theme.fg('muted', ` · ${this.#rangeLabel(visibleProfiles.length)}${status}`)}`;
+    const summary = this.enabled
+      ? this.theme.fg('muted', ' Approved routing profiles for workflow subagents.')
+      : this.theme.fg(
+          'warning',
+          ' Disabled: workflows cannot select profiles; subagents use the session model.'
+        );
     const rows = visibleProfiles.length
       ? visibleProfiles.flatMap((profile, offset) =>
           this.#profileLines(profile, this.#firstVisible + offset)
         )
       : [this.theme.fg('muted', '  No profiles configured.')];
-    const help = ' ↑/↓ or j/k move • Enter/e edit • n new • d delete • r reload • q/Esc close';
+    const help = ' ↑/↓ j/k move • Enter/e edit • n new • d delete • t toggle • r reload • q close';
 
     this.#cachedLines = [
       this.#rule(width),
       title,
-      this.theme.fg('muted', ' Approved routing profiles for workflow subagents.'),
+      summary,
       '',
       ...rows,
       '',

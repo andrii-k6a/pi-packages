@@ -11,6 +11,12 @@ export interface WorkflowProfile {
   thinkingLevel: ThinkingLevel;
 }
 
+/** User-owned profile file. `enabled: false` keeps the profiles on disk but approves none. */
+export interface WorkflowProfileConfig {
+  enabled: boolean;
+  profiles: WorkflowProfile[];
+}
+
 export interface ResolvedWorkflowProfile {
   /** Only provider and model identity are needed to route a durable subagent. */
   model: Pick<Model<Api>, 'provider' | 'id'>;

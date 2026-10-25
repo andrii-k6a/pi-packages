@@ -11,7 +11,12 @@ import { basename, dirname, join } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { terminalInput } from '../shared/terminal-text.js';
-import { boundedProfileText, describeProfileText, type WorkflowProfile } from './contracts.js';
+import {
+  boundedProfileText,
+  describeProfileText,
+  type WorkflowProfile,
+  type WorkflowProfileConfig
+} from './contracts.js';
 
 const CONFIG_FILE_NAME = 'pi-dynamic-workflows/profiles.json';
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -29,10 +34,16 @@ export function workflowProfilesPath(agentDir = getAgentDir()): string {
   return join(agentDir, CONFIG_FILE_NAME);
 }
 
-/** Loads approved profiles; a missing configuration file intentionally returns no profiles. */
+/** Loads approved profiles; a missing or disabled configuration intentionally approves none. */
 export function loadWorkflowProfiles(agentDir = getAgentDir()): WorkflowProfile[] {
+  const { enabled, profiles } = loadWorkflowProfileConfig(agentDir);
+  return enabled ? profiles : [];
+}
+
+/** Loads the configuration as stored, including the profiles of a disabled configuration. */
+export function loadWorkflowProfileConfig(agentDir = getAgentDir()): WorkflowProfileConfig {
   const path = workflowProfilesPath(agentDir);
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return { enabled: true, profiles: [] };
 
   let config: unknown;
   try {
@@ -45,27 +56,27 @@ export function loadWorkflowProfiles(agentDir = getAgentDir()): WorkflowProfile[
     );
   }
 
-  return parseWorkflowProfiles(config, path);
+  return parseWorkflowProfileConfig(config, path);
 }
 
 /**
- * Validates and atomically persists user-owned workflow profiles.
+ * Validates and atomically persists the user-owned workflow profile configuration.
  *
  * The parser is intentionally shared with loading so manager writes can never create a
  * configuration that the extension would reject on its subsequent runtime reload.
  */
-export function saveWorkflowProfiles(
-  profiles: unknown,
+export function saveWorkflowProfileConfig(
+  config: WorkflowProfileConfig,
   agentDir = getAgentDir()
-): WorkflowProfile[] {
+): WorkflowProfileConfig {
   const path = workflowProfilesPath(agentDir);
-  const validated = parseWorkflowProfiles({ profiles }, path);
+  const validated = parseWorkflowProfileConfig(config, path);
   const directory = dirname(path);
   const temporaryPath = join(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
 
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   try {
-    writeFileSync(temporaryPath, `${JSON.stringify({ profiles: validated }, null, 2)}\n`, {
+    writeFileSync(temporaryPath, `${JSON.stringify(validated, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600,
       flag: 'wx'
@@ -83,15 +94,18 @@ export function saveWorkflowProfiles(
   return validated;
 }
 
-export function parseWorkflowProfiles(config: unknown, path: string): WorkflowProfile[] {
+export function parseWorkflowProfileConfig(config: unknown, path: string): WorkflowProfileConfig {
   if (!isRecord(config)) throw profileConfigError(path, 'expected an object');
-  assertOnlyKeys(config, ['profiles'], 'configuration', path);
+  assertOnlyKeys(config, ['enabled', 'profiles'], 'configuration', path);
+  if (config.enabled !== undefined && typeof config.enabled !== 'boolean') {
+    throw profileConfigError(path, 'enabled must be a boolean');
+  }
   if (!Array.isArray(config.profiles)) {
     throw profileConfigError(path, 'profiles must be an array');
   }
 
   const names = new Set<string>();
-  return config.profiles.map((item, index) => {
+  const profiles = config.profiles.map((item, index) => {
     const itemPath = `profiles[${index}]`;
     if (!isRecord(item)) invalidConfig(path, `${itemPath} must be an object`);
     assertOnlyKeys(
@@ -113,6 +127,7 @@ export function parseWorkflowProfiles(config: unknown, path: string): WorkflowPr
     names.add(profile.name);
     return profile;
   });
+  return { enabled: config.enabled ?? true, profiles };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

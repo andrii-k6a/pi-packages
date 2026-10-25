@@ -12,7 +12,11 @@ import {
 } from '../../../src/pi/profiles/list.js';
 import { openWorkflowProfileManager } from '../../../src/pi/profiles/manager.js';
 import { WorkflowProfileWizard } from '../../../src/pi/profiles/wizard.js';
-import { loadWorkflowProfiles, saveWorkflowProfiles } from '../../../src/profiles/config.js';
+import {
+  loadWorkflowProfileConfig,
+  loadWorkflowProfiles,
+  saveWorkflowProfileConfig
+} from '../../../src/profiles/config.js';
 
 function model(provider: string, id: string, reasoning = true) {
   return {
@@ -29,7 +33,7 @@ function model(provider: string, id: string, reasoning = true) {
   };
 }
 
-type ManagerAction = 'edit' | 'new' | 'delete' | 'reload' | 'close' | undefined;
+type ManagerAction = 'edit' | 'new' | 'delete' | 'toggle' | 'reload' | 'close' | undefined;
 
 type MockContextOptions = {
   actions?: ManagerAction[];
@@ -49,6 +53,7 @@ type MockContextOptions = {
 function mockContext(options: MockContextOptions = {}) {
   const notifications: { message: string; type: string | undefined }[] = [];
   const wizardOptionLabels: string[][] = [];
+  const listScreens: string[] = [];
   let reloads = 0;
   const models = options.models ?? [model('active', 'fast'), model('other', 'thorough', false)];
   const ctx = {
@@ -102,6 +107,7 @@ function mockContext(options: MockContextOptions = {}) {
             return;
           }
           if (rendered.includes('/workflow-profiles')) {
+            listScreens.push(rendered);
             const action = options.actions?.shift();
             const input =
               action === 'edit'
@@ -110,9 +116,11 @@ function mockContext(options: MockContextOptions = {}) {
                   ? 'n'
                   : action === 'delete'
                     ? 'd'
-                    : action === 'reload'
-                      ? 'r'
-                      : 'q';
+                    : action === 'toggle'
+                      ? 't'
+                      : action === 'reload'
+                        ? 'r'
+                        : 'q';
             component.handleInput(input);
             return;
           }
@@ -129,6 +137,7 @@ function mockContext(options: MockContextOptions = {}) {
     ctx,
     notifications,
     wizardOptionLabels,
+    listScreens,
     get reloads() {
       return reloads;
     }
@@ -217,11 +226,18 @@ test('profile manager maps Kitty printable sequences to every Vim action', () =>
     (action) => actions.push(action ?? '')
   );
 
-  for (const input of ['\u001B[101u', '\u001B[110u', '\u001B[100u', '\u001B[114u', '\u001B[113u']) {
+  for (const input of [
+    '\u001B[101u',
+    '\u001B[110u',
+    '\u001B[100u',
+    '\u001B[116u',
+    '\u001B[114u',
+    '\u001B[113u'
+  ]) {
     list.handleInput(input);
   }
 
-  assert.deepEqual(actions, ['edit', 'new', 'delete', 'reload', 'close']);
+  assert.deepEqual(actions, ['edit', 'new', 'delete', 'toggle', 'reload', 'close']);
 });
 
 test('profile manager renders profiles as readable three-line cards', () => {
@@ -594,7 +610,7 @@ test('profile manager preserves prefilled name and description when an edit is u
   });
 
   try {
-    saveWorkflowProfiles([initial], directory);
+    saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
     await openWorkflowProfileManager(edit.ctx, directory);
 
     assert.equal(edit.reloads, 1);
@@ -619,7 +635,7 @@ test('profile manager edits and deletes profiles through mocked dialogs', async 
   });
 
   try {
-    saveWorkflowProfiles([initial], directory);
+    saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
     await openWorkflowProfileManager(edit.ctx, directory);
     assert.equal(edit.reloads, 1);
     assert.deepEqual(loadWorkflowProfiles(directory), [
@@ -636,6 +652,90 @@ test('profile manager edits and deletes profiles through mocked dialogs', async 
     await openWorkflowProfileManager(remove.ctx, directory);
     assert.equal(remove.reloads, 1);
     assert.deepEqual(loadWorkflowProfiles(directory), []);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test('profile manager disables and re-enables all profiles without changing them', async () => {
+  const directory = temporaryDirectory();
+  const initial = {
+    name: 'fast',
+    description: 'Quick',
+    model: 'fast',
+    thinkingLevel: 'low' as const
+  };
+  const profiles = [{ ...initial, provider: undefined }];
+
+  try {
+    saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
+
+    const disable = mockContext({ actions: ['toggle'] });
+    await openWorkflowProfileManager(disable.ctx, directory);
+    assert.equal(disable.reloads, 1);
+    assert.deepEqual(loadWorkflowProfileConfig(directory), { enabled: false, profiles });
+    assert.deepEqual(loadWorkflowProfiles(directory), []);
+
+    const enable = mockContext({ actions: ['toggle'] });
+    await openWorkflowProfileManager(enable.ctx, directory);
+    assert.equal(enable.reloads, 1);
+    assert.deepEqual(loadWorkflowProfileConfig(directory), { enabled: true, profiles });
+    assert.deepEqual(loadWorkflowProfiles(directory), profiles);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test('profile manager shows that profiles are disabled', async () => {
+  const directory = temporaryDirectory();
+  const initial = {
+    name: 'fast',
+    description: 'Quick',
+    model: 'fast',
+    thinkingLevel: 'low' as const
+  };
+
+  try {
+    saveWorkflowProfileConfig({ enabled: false, profiles: [initial] }, directory);
+    const disabled = mockContext({ actions: ['close'] });
+    await openWorkflowProfileManager(disabled.ctx, directory);
+    assert.match(disabled.listScreens[0], /1–1 of 1 profiles · disabled/);
+    assert.match(disabled.listScreens[0], /> 1\. fast/);
+    assert.match(disabled.listScreens[0], /Disabled: workflows cannot select profiles/);
+    assert.match(disabled.listScreens[0], /t toggle .*q close\n/);
+
+    saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
+    const enabled = mockContext({ actions: ['close'] });
+    await openWorkflowProfileManager(enabled.ctx, directory);
+    assert.doesNotMatch(enabled.listScreens[0], /disabled/i);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test('profile manager keeps profiles disabled while editing them', async () => {
+  const directory = temporaryDirectory();
+  const initial = {
+    name: 'fast',
+    description: 'Quick',
+    model: 'fast',
+    thinkingLevel: 'low' as const
+  };
+  const edit = mockContext({
+    actions: ['edit'],
+    inputs: ['faster', undefined],
+    selects: ['Use active session provider (active)', 'fast', 'low']
+  });
+
+  try {
+    saveWorkflowProfileConfig({ enabled: false, profiles: [initial] }, directory);
+    await openWorkflowProfileManager(edit.ctx, directory);
+
+    assert.equal(edit.reloads, 1);
+    assert.deepEqual(loadWorkflowProfileConfig(directory), {
+      enabled: false,
+      profiles: [{ ...initial, name: 'faster', provider: undefined }]
+    });
   } finally {
     rmSync(directory, { recursive: true });
   }

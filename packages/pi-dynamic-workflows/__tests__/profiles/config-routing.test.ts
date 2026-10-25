@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { test } from 'vitest';
-import { loadWorkflowProfiles, saveWorkflowProfiles } from '../../src/profiles/config.js';
+import {
+  loadWorkflowProfileConfig,
+  loadWorkflowProfiles,
+  saveWorkflowProfileConfig
+} from '../../src/profiles/config.js';
 import type { WorkflowProfileResolverContext } from '../../src/profiles/contracts.js';
 import { createWorkflowProfileResolver } from '../../src/profiles/routing.js';
 
@@ -84,12 +88,41 @@ test('loadWorkflowProfiles accepts a valid user-owned config and ignores a missi
   }
 });
 
+test('a disabled configuration approves no profiles but keeps them for the manager', () => {
+  const profile = {
+    name: 'fast',
+    description: 'Quick repository triage',
+    provider: 'active',
+    model: 'fast-model',
+    thinkingLevel: 'low'
+  };
+  const disabled = temporaryConfig(JSON.stringify({ enabled: false, profiles: [profile] }));
+  const implicit = temporaryConfig(JSON.stringify({ profiles: [profile] }));
+  const missing = temporaryConfig();
+  try {
+    assert.deepEqual(loadWorkflowProfiles(disabled), []);
+    assert.deepEqual(loadWorkflowProfileConfig(disabled), {
+      enabled: false,
+      profiles: [profile]
+    });
+    assert.equal(loadWorkflowProfileConfig(implicit).enabled, true);
+    assert.deepEqual(loadWorkflowProfiles(implicit), [profile]);
+    assert.deepEqual(loadWorkflowProfileConfig(missing), { enabled: true, profiles: [] });
+  } finally {
+    rmSync(disabled, { recursive: true });
+    rmSync(implicit, { recursive: true });
+    rmSync(missing, { recursive: true });
+  }
+});
+
 test('loadWorkflowProfiles rejects malformed and invalid profile configurations', () => {
   const cases = [
     ['{', /Invalid dynamic workflow profile configuration/],
     ['[]', /expected an object/],
     ['{"unknown": true, "profiles": []}', /unknown key/],
     ['{"profiles": {}}', /profiles must be an array/],
+    ['{"enabled": "no", "profiles": []}', /enabled must be a boolean/],
+    ['{"enabled": false}', /profiles must be an array/],
     [
       '{"profiles": [{"name":"", "description":"desc", "model":"model", "thinkingLevel":"low"}]}',
       /non-empty string/
@@ -201,7 +234,7 @@ test('profile configuration errors sanitize and bound unknown keys', () => {
   }
 });
 
-test('saveWorkflowProfiles creates its missing directory and validates before replacing configuration', () => {
+test('saveWorkflowProfileConfig creates its missing directory and validates before replacing configuration', () => {
   const directory = temporaryConfig();
   const profile = {
     name: 'fast',
@@ -212,18 +245,34 @@ test('saveWorkflowProfiles creates its missing directory and validates before re
   const parsedProfile = { ...profile, provider: undefined };
 
   try {
-    assert.deepEqual(saveWorkflowProfiles([profile], directory), [parsedProfile]);
+    assert.deepEqual(
+      saveWorkflowProfileConfig({ enabled: false, profiles: [profile] }, directory),
+      {
+        enabled: false,
+        profiles: [parsedProfile]
+      }
+    );
     assert.equal(
       readFileSync(join(directory, 'pi-dynamic-workflows', 'profiles.json'), 'utf8'),
-      `${JSON.stringify({ profiles: [profile] }, null, 2)}\n`
+      `${JSON.stringify({ enabled: false, profiles: [profile] }, null, 2)}\n`
     );
-    assert.deepEqual(loadWorkflowProfiles(directory), [parsedProfile]);
+    assert.deepEqual(loadWorkflowProfileConfig(directory), {
+      enabled: false,
+      profiles: [parsedProfile]
+    });
 
     assert.throws(
-      () => saveWorkflowProfiles([{ ...profile, name: '' }], directory),
+      () =>
+        saveWorkflowProfileConfig(
+          { enabled: true, profiles: [{ ...profile, name: '' }] },
+          directory
+        ),
       /non-empty string/
     );
-    assert.deepEqual(loadWorkflowProfiles(directory), [parsedProfile]);
+    assert.deepEqual(loadWorkflowProfileConfig(directory), {
+      enabled: false,
+      profiles: [parsedProfile]
+    });
   } finally {
     rmSync(directory, { recursive: true });
   }
