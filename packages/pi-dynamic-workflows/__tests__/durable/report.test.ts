@@ -13,6 +13,7 @@ import { renderWorkflowLines } from '../../src/pi/display.js';
 import {
   renderRunDetailLines,
   renderTranscriptLines,
+  renderTranscriptText,
   resumeInstruction,
   runListLine
 } from '../../src/pi/runs-command.js';
@@ -341,6 +342,27 @@ test('renderTranscriptLines labels items, wraps text, and keeps line breaks', ()
   assert.deepEqual(lines.slice(0, 4), [' user', '   first line', '   second line', '']);
   assert.equal(lines[4], ' ← bash (error)');
   assert.ok(lines.slice(5).filter((line) => line.startsWith('   x')).length >= 2);
+});
+
+test('renderTranscriptText keeps the full text for an editor, one heading per item', () => {
+  const long = `${'x'.repeat(5000)}\n\u001b[31mred\u001b[0m`;
+  const text = renderTranscriptText('run-1 · #1 scan', [
+    { role: 'user', text: 'first\nsecond' },
+    { role: 'tool-call', toolName: 'bash', text: '{"command":"ls"}' },
+    { role: 'tool-result', toolName: 'bash', isError: true, text: long }
+  ]);
+  assert.equal(
+    text
+      .split('\n')
+      .filter((line) => line.startsWith('## '))
+      .join('|'),
+    '## 1. user|## 2. → bash|## 3. ← bash (error)'
+  );
+  assert.ok(text.startsWith('# run-1 · #1 scan\n\n## 1. user\n\nfirst\nsecond\n'));
+  assert.ok(text.includes('x'.repeat(5000)), 'long tool results are not truncated');
+  assert.ok(text.includes('\nred'), 'terminal escapes are removed');
+  assert.ok(!text.includes('\u001b'));
+  assert.match(renderTranscriptText('t', []), /\(empty transcript\)/);
 });
 
 test('resumeInstruction asks the model to resume through the workflow tool', () => {

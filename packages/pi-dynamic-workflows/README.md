@@ -98,6 +98,9 @@ An interactive inspector (`/workflows <runId>` jumps to one run):
 - **List**: status (running, interrupted, completed, failed, aborted), agents done, attempts, age, run id. `Enter` inspects, `r` resumes (asks the model to call the tool), `a` aborts (also works for interrupted runs), `d` twice deletes.
 - **Run**: attempts (`[`/`]`), phases, every agent with duration, tokens, cost, profile, model, reuse marks (`↺`), prompt, result preview, error, and the selected agent's unresolved compaction failure.
 - **Transcript**: `Enter` on an agent shows its full conversation: prompt, thinking, text, tool calls, and tool results.
+  Press `e` to read the whole transcript in your editor. It opens as a temporary Markdown file with one `## n. role` heading per item and untruncated tool results. Edits are discarded.
+
+  The editor is chosen like Pi's `Ctrl+G`: the global `externalEditor` setting, then `$VISUAL`, then `$EDITOR`. The command is split on spaces, so `nvim -R` works but quoted arguments do not. A graphical editor must wait for the file to close, for example `code --wait`.
 
 Non-interactive modes return the same text summary without calling the model:
 

@@ -200,6 +200,7 @@ test.each([18, 24, 40])(
       { fg: (_color, value) => value, bold: (value) => value } as Theme,
       { list: () => [], report: async () => largeReport } as unknown as WorkflowHost,
       () => {},
+      async () => {},
       report.runId
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -217,3 +218,89 @@ test.each([18, 24, 40])(
     }
   }
 );
+
+function transcriptBrowser(viewInEditor: (text: string, filename: string) => Promise<void>) {
+  const withTranscript: WorkflowRunReport = {
+    ...report,
+    attempts: [
+      {
+        number: 1,
+        taskId: 1,
+        status: 'completed',
+        script: '',
+        scriptHash: 'test',
+        startedAt: 1,
+        phases: ['Scan'],
+        logs: [],
+        agents: {
+          a: {
+            key: 'a',
+            index: 1,
+            label: 'scan',
+            phase: 'Scan',
+            status: 'done',
+            conversationId: 7,
+            prompt: 'Prompt',
+            preview: 'Result'
+          }
+        }
+      }
+    ]
+  };
+  const transcript = vi.fn(async () => [
+    { role: 'user' as const, text: 'Prompt' },
+    { role: 'tool-result' as const, toolName: 'bash', text: 'y'.repeat(6000) }
+  ]);
+  const browser = new WorkflowRunsBrowser(
+    { terminal: { rows: 24 }, requestRender() {} } as unknown as TUI,
+    { fg: (_color, value) => value, bold: (value) => value } as Theme,
+    { list: () => [], report: async () => withTranscript, transcript } as unknown as WorkflowHost,
+    () => {},
+    viewInEditor,
+    report.runId
+  );
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  return { browser, settle, transcript };
+}
+
+test('e in a transcript opens the whole transcript in the editor', async () => {
+  const viewed: Array<{ text: string; filename: string }> = [];
+  const { browser, settle } = transcriptBrowser(async (text, filename) => {
+    viewed.push({ text, filename });
+  });
+  await settle();
+  browser.handleInput('\r');
+  await settle();
+  browser.handleInput('e');
+  await settle();
+  assert.equal(viewed.length, 1);
+  assert.equal(viewed[0].filename, 'run-1-transcript.md');
+  assert.ok(viewed[0].text.startsWith('# run-1 · #1 scan'));
+  assert.ok(viewed[0].text.includes('y'.repeat(6000)), 'the editor gets the untruncated text');
+  assert.ok(!browser.render(100).join('\n').includes('Could not open'));
+});
+
+test('a failure to start the editor is shown and does not break the browser', async () => {
+  const view = vi.fn().mockRejectedValueOnce(new Error('spawn nvim ENOENT'));
+  const { browser, settle } = transcriptBrowser(view);
+  await settle();
+  browser.handleInput('\r');
+  await settle();
+  browser.handleInput('e');
+  await settle();
+  assert.match(browser.render(100).join('\n'), /Could not open the editor: spawn nvim ENOENT/);
+  view.mockResolvedValueOnce(undefined);
+  browser.handleInput('e');
+  assert.equal(view.mock.calls.length, 2);
+});
+
+test('a second e while the editor is open does not start another editor', async () => {
+  const view = vi.fn(() => new Promise<void>(() => {}));
+  const { browser, settle } = transcriptBrowser(view);
+  await settle();
+  browser.handleInput('\r');
+  await settle();
+  browser.handleInput('e');
+  browser.handleInput('e');
+  assert.equal(view.mock.calls.length, 1);
+});

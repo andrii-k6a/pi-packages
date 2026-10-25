@@ -17,6 +17,7 @@ import {
 import type { WorkflowRunIndex } from '../durable/store.js';
 import { terminalLine as sanitize, terminalMultiline } from '../shared/terminal-text.js';
 import { formatCost, formatDuration, formatTokens } from './display.js';
+import { resolveEditorCommand, viewInExternalEditor } from './external-editor.js';
 
 const STATUS_ICONS: Record<string, string> = {
   running: '●',
@@ -44,7 +45,15 @@ export async function openWorkflowRuns(
   }
   const result = await ctx.ui.custom<{ resume?: string } | undefined>(
     (tui, theme, _keybindings, done) =>
-      new WorkflowRunsBrowser(tui, theme, host, (value) => done(value), runId)
+      new WorkflowRunsBrowser(
+        tui,
+        theme,
+        host,
+        (value) => done(value),
+        async (text, filename) =>
+          viewInExternalEditor(tui, text, { command: resolveEditorCommand(ctx.cwd), filename }),
+        runId
+      )
   );
   if (result?.resume) {
     const message = resumeInstruction(result.resume);
@@ -132,12 +141,14 @@ export class WorkflowRunsBrowser {
   #message: { text: string; tone: 'muted' | 'warning' | 'error' } | undefined;
   #pendingDelete: string | undefined;
   #cache: { width: number; lines: string[] } | undefined;
+  #editing = false;
 
   constructor(
     private readonly tui: TUI,
     private readonly theme: Theme,
     private readonly host: WorkflowHost,
     private readonly done: (result: { resume?: string } | undefined) => void,
+    private readonly viewInEditor: (text: string, filename: string) => Promise<void>,
     initialRunId?: string
   ) {
     this.#mode = { kind: 'list', runs: host.list(), selected: 0 };
@@ -145,6 +156,7 @@ export class WorkflowRunsBrowser {
   }
 
   handleInput(data: string): void {
+    if (this.#editing) return;
     const mode = this.#mode;
     if (mode.kind === 'list') this.#listInput(mode, data);
     else if (mode.kind === 'detail') this.#detailInput(mode, data);
@@ -206,7 +218,7 @@ export class WorkflowRunsBrowser {
       case 'detail':
         return ' ↑/↓ agent • Enter transcript • [/] attempt • r resume • a abort • g refresh • Esc back';
       default:
-        return ' ↑/↓ scroll • PgUp/PgDn page • Home/End • Esc back';
+        return ' ↑/↓ scroll • PgUp/PgDn page • Home/End • e open in editor • Esc back';
     }
   }
 
@@ -366,8 +378,32 @@ export class WorkflowRunsBrowser {
     else if (matchesKey(data, Key.pageUp)) mode.offset = Math.max(0, mode.offset - page);
     else if (matchesKey(data, Key.home)) mode.offset = 0;
     else if (matchesKey(data, Key.end)) mode.offset = Number.MAX_SAFE_INTEGER;
-    else return;
+    else if (matchesKey(data, 'e')) {
+      void this.#openInEditor(mode);
+      return;
+    } else return;
     this.#refresh();
+  }
+
+  /** The whole transcript, unwrapped and untruncated, in the user's editor. */
+  async #openInEditor(mode: Extract<BrowserMode, { kind: 'transcript' }>): Promise<void> {
+    if (!mode.items) {
+      this.#notify('The transcript is still loading.');
+      return;
+    }
+    this.#editing = true;
+    try {
+      await this.viewInEditor(
+        renderTranscriptText(`${mode.runId} · ${mode.title}`, mode.items),
+        `${mode.runId}-transcript.md`
+      );
+      this.#message = undefined;
+      this.#refresh();
+    } catch (error) {
+      this.#notify(`Could not open the editor: ${errorText(error)}`, 'error');
+    } finally {
+      this.#editing = false;
+    }
   }
 
   #openDetail(runId: string, previous?: Extract<BrowserMode, { kind: 'detail' }>): void {
@@ -512,13 +548,7 @@ export function renderTranscriptLines(
   const inner = Math.max(20, width - 4);
   const lines: string[] = [];
   for (const item of items) {
-    const label =
-      item.role === 'tool-call'
-        ? `→ ${item.toolName ?? 'tool'}`
-        : item.role === 'tool-result'
-          ? `← ${item.toolName ?? 'tool'}${item.isError ? ' (error)' : ''}`
-          : item.role;
-    lines.push(` ${sanitize(label)}`);
+    lines.push(` ${itemLabel(item)}`);
     const text = terminalMultiline(item.text);
     const limited =
       item.role === 'tool-result' && text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
@@ -528,6 +558,27 @@ export function renderTranscriptLines(
     lines.push('');
   }
   return lines.length ? lines : ['   (empty transcript)'];
+}
+
+/** The transcript as Markdown for an editor: a `## n. label` heading per item, text in full. */
+export function renderTranscriptText(
+  title: string,
+  items: readonly WorkflowTranscriptItem[]
+): string {
+  const sections = items.map(
+    (item, index) => `## ${index + 1}. ${itemLabel(item)}\n\n${terminalMultiline(item.text)}\n`
+  );
+  return `# ${sanitize(title)}\n\n${sections.length ? sections.join('\n') : '(empty transcript)\n'}`;
+}
+
+function itemLabel(item: WorkflowTranscriptItem): string {
+  const label =
+    item.role === 'tool-call'
+      ? `→ ${item.toolName ?? 'tool'}`
+      : item.role === 'tool-result'
+        ? `← ${item.toolName ?? 'tool'}${item.isError ? ' (error)' : ''}`
+        : item.role;
+  return sanitize(label);
 }
 
 function toneFor(status: string): 'text' | 'muted' | 'warning' | 'error' {
