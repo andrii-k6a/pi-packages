@@ -71,7 +71,7 @@ async function configForAction(
   config: WorkflowProfileConfig,
   ctx: ExtensionCommandContext
 ): Promise<WorkflowProfileConfig | undefined> {
-  if (action === 'toggle') return { ...config, enabled: !config.enabled };
+  if (action === 'toggleAll') return { ...config, enabled: !config.enabled };
   const profiles = await profilesForAction(action, profile, config.profiles, ctx);
   return profiles && { ...config, profiles };
 }
@@ -89,8 +89,15 @@ async function profilesForAction(
   if (action === 'edit' && profile) {
     const next = await editWorkflowProfile(ctx, profile);
     return next
-      ? profiles.map((current) => (current.name === profile.name ? next : current))
+      ? profiles.map((current) =>
+          current.name === profile.name ? { ...next, enabled: profile.enabled } : current
+        )
       : undefined;
+  }
+  if (action === 'toggleProfile' && profile) {
+    return profiles.map((current) =>
+      current.name === profile.name ? { ...current, enabled: current.enabled === false } : current
+    );
   }
   if (action === 'delete' && profile) {
     const confirmed = await ctx.ui.confirm('Delete workflow profile?', profile.name);

@@ -33,10 +33,19 @@ function model(provider: string, id: string, reasoning = true) {
   };
 }
 
-type ManagerAction = 'edit' | 'new' | 'delete' | 'toggle' | 'reload' | 'close' | undefined;
+type ManagerAction =
+  | 'edit'
+  | 'new'
+  | 'delete'
+  | 'toggleProfile'
+  | 'toggleAll'
+  | 'reload'
+  | 'close'
+  | undefined;
 
 type MockContextOptions = {
   actions?: ManagerAction[];
+  moveDown?: number;
   inputs?: (string | undefined)[];
   selects?: (string | undefined)[];
   confirms?: boolean[];
@@ -108,6 +117,7 @@ function mockContext(options: MockContextOptions = {}) {
           }
           if (rendered.includes('/workflow-profiles')) {
             listScreens.push(rendered);
+            for (let row = 0; row < (options.moveDown ?? 0); row++) component.handleInput('j');
             const action = options.actions?.shift();
             const input =
               action === 'edit'
@@ -116,11 +126,13 @@ function mockContext(options: MockContextOptions = {}) {
                   ? 'n'
                   : action === 'delete'
                     ? 'd'
-                    : action === 'toggle'
-                      ? 't'
-                      : action === 'reload'
-                        ? 'r'
-                        : 'q';
+                    : action === 'toggleProfile'
+                      ? ' '
+                      : action === 'toggleAll'
+                        ? 't'
+                        : action === 'reload'
+                          ? 'r'
+                          : 'q';
             component.handleInput(input);
             return;
           }
@@ -230,6 +242,7 @@ test('profile manager maps Kitty printable sequences to every Vim action', () =>
     '\u001B[101u',
     '\u001B[110u',
     '\u001B[100u',
+    '\u001B[32u',
     '\u001B[116u',
     '\u001B[114u',
     '\u001B[113u'
@@ -237,7 +250,15 @@ test('profile manager maps Kitty printable sequences to every Vim action', () =>
     list.handleInput(input);
   }
 
-  assert.deepEqual(actions, ['edit', 'new', 'delete', 'toggle', 'reload', 'close']);
+  assert.deepEqual(actions, [
+    'edit',
+    'new',
+    'delete',
+    'toggleProfile',
+    'toggleAll',
+    'reload',
+    'close'
+  ]);
 });
 
 test('profile manager renders profiles as readable three-line cards', () => {
@@ -657,6 +678,84 @@ test('profile manager edits and deletes profiles through mocked dialogs', async 
   }
 });
 
+test('profile manager disables and re-enables the selected profile only', async () => {
+  const directory = temporaryDirectory();
+  const fast = { name: 'fast', description: 'Quick', model: 'fast', thinkingLevel: 'low' as const };
+  const deep = { name: 'deep', description: 'Slow', model: 'deep', thinkingLevel: 'high' as const };
+
+  try {
+    saveWorkflowProfileConfig({ enabled: true, profiles: [fast, deep] }, directory);
+
+    const disable = mockContext({ actions: ['toggleProfile'], moveDown: 1 });
+    await openWorkflowProfileManager(disable.ctx, directory);
+    assert.equal(disable.reloads, 1);
+    assert.deepEqual(loadWorkflowProfileConfig(directory), {
+      enabled: true,
+      profiles: [
+        { ...fast, provider: undefined },
+        { ...deep, provider: undefined, enabled: false }
+      ]
+    });
+    assert.deepEqual(
+      loadWorkflowProfiles(directory).map((profile) => profile.name),
+      ['fast']
+    );
+
+    const enable = mockContext({ actions: ['toggleProfile'], moveDown: 1 });
+    await openWorkflowProfileManager(enable.ctx, directory);
+    assert.match(enable.listScreens[0], / {2}2\. deep · disabled/);
+    assert.equal(enable.reloads, 1);
+    assert.deepEqual(
+      loadWorkflowProfiles(directory).map((profile) => profile.name),
+      ['fast', 'deep']
+    );
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test('profile manager ignores the profile toggle when there are no profiles', async () => {
+  const directory = temporaryDirectory();
+  const toggle = mockContext({ actions: ['toggleProfile'] });
+
+  try {
+    await openWorkflowProfileManager(toggle.ctx, directory);
+
+    assert.equal(toggle.reloads, 0);
+    assert.deepEqual(toggle.notifications, []);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test('profile manager keeps a disabled profile disabled while editing it', async () => {
+  const directory = temporaryDirectory();
+  const initial = {
+    name: 'fast',
+    description: 'Quick',
+    model: 'fast',
+    thinkingLevel: 'low' as const,
+    enabled: false
+  };
+  const edit = mockContext({
+    actions: ['edit'],
+    inputs: ['faster', undefined],
+    selects: ['Use active session provider (active)', 'fast', 'low']
+  });
+
+  try {
+    saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
+    await openWorkflowProfileManager(edit.ctx, directory);
+
+    assert.deepEqual(loadWorkflowProfileConfig(directory).profiles, [
+      { ...initial, name: 'faster', provider: undefined }
+    ]);
+    assert.deepEqual(loadWorkflowProfiles(directory), []);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
 test('profile manager disables and re-enables all profiles without changing them', async () => {
   const directory = temporaryDirectory();
   const initial = {
@@ -670,13 +769,13 @@ test('profile manager disables and re-enables all profiles without changing them
   try {
     saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
 
-    const disable = mockContext({ actions: ['toggle'] });
+    const disable = mockContext({ actions: ['toggleAll'] });
     await openWorkflowProfileManager(disable.ctx, directory);
     assert.equal(disable.reloads, 1);
     assert.deepEqual(loadWorkflowProfileConfig(directory), { enabled: false, profiles });
     assert.deepEqual(loadWorkflowProfiles(directory), []);
 
-    const enable = mockContext({ actions: ['toggle'] });
+    const enable = mockContext({ actions: ['toggleAll'] });
     await openWorkflowProfileManager(enable.ctx, directory);
     assert.equal(enable.reloads, 1);
     assert.deepEqual(loadWorkflowProfileConfig(directory), { enabled: true, profiles });
@@ -702,7 +801,7 @@ test('profile manager shows that profiles are disabled', async () => {
     assert.match(disabled.listScreens[0], /1–1 of 1 profiles · disabled/);
     assert.match(disabled.listScreens[0], /> 1\. fast/);
     assert.match(disabled.listScreens[0], /Disabled: workflows cannot select profiles/);
-    assert.match(disabled.listScreens[0], /t toggle .*q close\n/);
+    assert.match(disabled.listScreens[0], /Space on\/off • t all • r reload • q close\n/);
 
     saveWorkflowProfileConfig({ enabled: true, profiles: [initial] }, directory);
     const enabled = mockContext({ actions: ['close'] });

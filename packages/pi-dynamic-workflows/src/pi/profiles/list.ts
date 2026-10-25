@@ -7,7 +7,8 @@ export type ProfileManagerAction =
   | 'edit'
   | 'new'
   | 'delete'
-  | 'toggle'
+  | 'toggleProfile'
+  | 'toggleAll'
   | 'reload'
   | 'close'
   | undefined;
@@ -57,7 +58,8 @@ export class WorkflowProfileList {
     if (matchesKey(data, Key.enter) || matchesKey(data, 'e')) action = 'edit';
     else if (matchesKey(data, 'n')) action = 'new';
     else if (matchesKey(data, 'd')) action = 'delete';
-    else if (matchesKey(data, 't')) action = 'toggle';
+    else if (matchesKey(data, Key.space)) action = 'toggleProfile';
+    else if (matchesKey(data, 't')) action = 'toggleAll';
     else if (matchesKey(data, 'r')) action = 'reload';
     else if (matchesKey(data, 'q') || matchesKey(data, Key.escape)) action = 'close';
     else return;
@@ -84,7 +86,7 @@ export class WorkflowProfileList {
           this.#profileLines(profile, this.#firstVisible + offset)
         )
       : [this.theme.fg('muted', '  No profiles configured.')];
-    const help = ' ↑/↓ j/k move • Enter/e edit • n new • d delete • t toggle • r reload • q close';
+    const help = ' ↑↓ move • e edit • n new • d delete • Space on/off • t all • r reload • q close';
 
     this.#cachedLines = [
       this.#rule(width),
@@ -115,9 +117,11 @@ export class WorkflowProfileList {
     const provider = profile.provider ? terminalInput(profile.provider) : 'active session provider';
     const prefix = `${selected ? '>' : ' '} ${index + 1}. `;
     const indent = ' '.repeat(prefix.length);
+    const disabledMarker = profile.enabled === false ? this.theme.fg('warning', ' · disabled') : '';
 
     return [
-      this.theme.fg(selected ? 'accent' : 'text', `${prefix}${this.theme.bold(name)}`),
+      this.theme.fg(selected ? 'accent' : 'text', `${prefix}${this.theme.bold(name)}`) +
+        disabledMarker,
       this.theme.fg(selected ? 'text' : 'muted', `${indent}${description}`),
       this.theme.fg(
         selected ? 'muted' : 'dim',

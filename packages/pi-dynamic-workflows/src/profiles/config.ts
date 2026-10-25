@@ -34,10 +34,13 @@ export function workflowProfilesPath(agentDir = getAgentDir()): string {
   return join(agentDir, CONFIG_FILE_NAME);
 }
 
-/** Loads approved profiles; a missing or disabled configuration intentionally approves none. */
+/**
+ * Loads approved profiles; a missing or disabled configuration intentionally approves none, and
+ * individually disabled profiles are skipped.
+ */
 export function loadWorkflowProfiles(agentDir = getAgentDir()): WorkflowProfile[] {
   const { enabled, profiles } = loadWorkflowProfileConfig(agentDir);
-  return enabled ? profiles : [];
+  return enabled ? profiles.filter((profile) => profile.enabled !== false) : [];
 }
 
 /** Loads the configuration as stored, including the profiles of a disabled configuration. */
@@ -97,9 +100,7 @@ export function saveWorkflowProfileConfig(
 export function parseWorkflowProfileConfig(config: unknown, path: string): WorkflowProfileConfig {
   if (!isRecord(config)) throw profileConfigError(path, 'expected an object');
   assertOnlyKeys(config, ['enabled', 'profiles'], 'configuration', path);
-  if (config.enabled !== undefined && typeof config.enabled !== 'boolean') {
-    throw profileConfigError(path, 'enabled must be a boolean');
-  }
+  const enabled = optionalBoolean(config.enabled, 'enabled', path);
   if (!Array.isArray(config.profiles)) {
     throw profileConfigError(path, 'profiles must be an array');
   }
@@ -110,24 +111,26 @@ export function parseWorkflowProfileConfig(config: unknown, path: string): Workf
     if (!isRecord(item)) invalidConfig(path, `${itemPath} must be an object`);
     assertOnlyKeys(
       item,
-      ['name', 'description', 'provider', 'model', 'thinkingLevel'],
+      ['name', 'description', 'provider', 'model', 'thinkingLevel', 'enabled'],
       itemPath,
       path
     );
 
+    const profileEnabled = optionalBoolean(item.enabled, `${itemPath}.enabled`, path);
     const profile: WorkflowProfile = {
       name: requiredText(item.name, `${itemPath}.name`, path),
       description: requiredText(item.description, `${itemPath}.description`, path),
       provider: optionalText(item.provider, `${itemPath}.provider`, path),
       model: requiredText(item.model, `${itemPath}.model`, path),
-      thinkingLevel: requiredThinkingLevel(item.thinkingLevel, `${itemPath}.thinkingLevel`, path)
+      thinkingLevel: requiredThinkingLevel(item.thinkingLevel, `${itemPath}.thinkingLevel`, path),
+      ...(profileEnabled === undefined ? {} : { enabled: profileEnabled })
     };
     if (names.has(profile.name))
       invalidConfig(path, `${itemPath}.name duplicates ${describeProfileText(profile.name)}`);
     names.add(profile.name);
     return profile;
   });
-  return { enabled: config.enabled ?? true, profiles };
+  return { enabled: enabled ?? true, profiles };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -157,6 +160,12 @@ function requiredText(value: unknown, name: string, path: string): string {
 function optionalText(value: unknown, name: string, path: string): string | undefined {
   if (value === undefined) return undefined;
   return requiredText(value, name, path);
+}
+
+function optionalBoolean(value: unknown, name: string, path: string): boolean | undefined {
+  if (value !== undefined && typeof value !== 'boolean')
+    invalidConfig(path, `${name} must be a boolean`);
+  return value;
 }
 
 function requiredThinkingLevel(value: unknown, name: string, path: string): ThinkingLevel {

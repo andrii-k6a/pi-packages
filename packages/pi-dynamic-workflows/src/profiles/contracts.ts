@@ -9,6 +9,11 @@ export interface WorkflowProfile {
   provider?: string;
   model: string;
   thinkingLevel: ThinkingLevel;
+  /**
+   * Omitted means enabled. `false` keeps the profile on disk, but `loadWorkflowProfiles` skips it.
+   * The resolver and the workflow tool trust the profiles they receive.
+   */
+  enabled?: boolean;
 }
 
 /** User-owned profile file. `enabled: false` keeps the profiles on disk but approves none. */

@@ -115,6 +115,34 @@ test('a disabled configuration approves no profiles but keeps them for the manag
   }
 });
 
+test('a disabled profile is not approved but stays in the stored configuration', () => {
+  const profile = {
+    name: 'fast',
+    description: 'Quick repository triage',
+    provider: 'active',
+    model: 'fast-model',
+    thinkingLevel: 'low'
+  };
+  const deep = { ...profile, name: 'deep' };
+  const directory = temporaryConfig(
+    JSON.stringify({
+      profiles: [
+        { ...profile, enabled: false },
+        { ...deep, enabled: true }
+      ]
+    })
+  );
+  try {
+    assert.deepEqual(loadWorkflowProfiles(directory), [{ ...deep, enabled: true }]);
+    assert.deepEqual(loadWorkflowProfileConfig(directory).profiles[0], {
+      ...profile,
+      enabled: false
+    });
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
 test('loadWorkflowProfiles rejects malformed and invalid profile configurations', () => {
   const cases = [
     ['{', /Invalid dynamic workflow profile configuration/],
@@ -123,6 +151,10 @@ test('loadWorkflowProfiles rejects malformed and invalid profile configurations'
     ['{"profiles": {}}', /profiles must be an array/],
     ['{"enabled": "no", "profiles": []}', /enabled must be a boolean/],
     ['{"enabled": false}', /profiles must be an array/],
+    [
+      '{"profiles": [{"name":"fast", "description":"desc", "model":"model", "thinkingLevel":"low", "enabled":"no"}]}',
+      /profiles\[0\]\.enabled must be a boolean/
+    ],
     [
       '{"profiles": [{"name":"", "description":"desc", "model":"model", "thinkingLevel":"low"}]}',
       /non-empty string/
