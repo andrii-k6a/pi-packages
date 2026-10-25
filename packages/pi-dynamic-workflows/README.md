@@ -47,7 +47,7 @@ The model will write a workflow script and call the `workflow` tool. Live progre
 
 Rows also show duration, tokens, the model/profile in use, and what each running subagent is doing right now (for example `bash: npm test`, `thinking`, or `retrying (attempt 2): 429`). Extensions that call other tools show the nested work, such as `codemode → bash: 3 passed`, rather than just the orchestrator. Unresolved compaction failures appear as warnings, including after the agent finishes. The footer shows the run id, attempt, elapsed time, and spend.
 
-Press `Esc` to cancel a running workflow. Active subagents are aborted bottom-up and surfaced as skipped, **completed results are kept**, and the error names the run id so the model (or you) can resume it.
+Press `Esc` to cancel a running workflow. Active subagents are aborted bottom-up and surfaced as skipped, **completed results are kept**, and the error names the run id so the model (or you) can resume it. To follow, steer, or stop a single agent instead, use [`/workflows`](#workflows).
 
 ## Durable runs
 
@@ -96,9 +96,15 @@ Upgrading to Pi Durable 1.3.0 needs no run migration: its storage layout is unch
 An interactive inspector (`/workflows <runId>` jumps to one run):
 
 - **List**: status (running, interrupted, completed, failed, aborted), agents done, attempts, age, run id. `Enter` inspects, `r` resumes (asks the model to call the tool), `a` aborts (also works for interrupted runs), `d` twice deletes.
-- **Run**: attempts (`[`/`]`), phases, every agent with duration, tokens, cost, profile, model, reuse marks (`↺`), prompt, result preview, error, and the selected agent's unresolved compaction failure.
+- **Run**: attempts (`[`/`]`), phases, every agent with duration, tokens, cost, profile, model, reuse marks (`↺`), prompt, result preview, error, and the selected agent's unresolved compaction failure. `x` twice cancels the selected running agent.
 - **Transcript**: `Enter` on an agent shows its full conversation: prompt, thinking, text, tool calls, and tool results.
   Press `e` to read the whole transcript in your editor. It opens as a temporary Markdown file with one `## n. role` heading per item and untruncated tool results. Edits are discarded.
+
+  A running agent of a run that this session drives opens as a live view. The reply and tool output stream in as they are produced, and the view stays at the tail until you scroll up. Scrolling back to the bottom follows it again. `/workflows` also opens while the workflow tool is running.
+
+  Press `m` to write a message to the live agent. It is a steer: the agent reads it after its current tool round and carries on with the same conversation. Messages to an agent that is between turns or finished are refused. Press `x` twice, here or on the selected agent in the run view, to cancel that agent only. Its `agent()` call fails like any other subagent failure (`null` in the script, with a log line) and the rest of the run continues. A run resumed in place keeps the agent cancelled. A new attempt after a failure or abort runs it again, because only completed agents are reused. Agents of interrupted runs, and finished agents, open as a snapshot, so following, steering, and cancelling need the run to be live in this session.
+
+  Scrolling follows your Pi fullscreen navigation. The page, half page, line, top, bottom, and previous or next prompt actions (`tui.altScreen.*`) use whatever keys you have bound, so a change in `keybindings.json` applies after `/reload`, and the footer shows the keys currently bound. A page keeps four lines of overlap, as in Pi. The prompt actions jump between user messages, which are the agent's prompt and your steers. The arrow keys, `j`/`k`, and `Space` also scroll. `Home` and `End` scroll only if you bind them (Pi's defaults are `ctrl+home` and `ctrl+end`). The mouse wheel uses Pi's wheel settings in fullscreen mode, the default, while regular mode leaves the wheel to the terminal. Pi's transcript search does not reach the inspector. The inspector opens as an overlay so that Pi's fullscreen viewport does not consume the scroll keys first.
 
   The editor is chosen like Pi's `Ctrl+G`: the global `externalEditor` setting, then `$VISUAL`, then `$EDITOR`. The command is split on spaces, so `nvim -R` works but quoted arguments do not. A graphical editor must wait for the file to close, for example `code --wait`.
 

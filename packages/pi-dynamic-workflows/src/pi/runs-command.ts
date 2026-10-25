@@ -1,9 +1,15 @@
 import { writeFileSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from '@earendil-works/pi-coding-agent';
 import {
+  type Focusable,
+  Input,
   Key,
+  type Keybinding,
+  type KeybindingsManager,
   matchesKey,
   type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
   truncateToWidth,
   wrapTextWithAnsi
 } from '@earendil-works/pi-tui';
@@ -15,9 +21,16 @@ import {
   type WorkflowTranscriptItem
 } from '../durable/report.js';
 import type { WorkflowRunIndex } from '../durable/store.js';
-import { terminalLine as sanitize, terminalMultiline } from '../shared/terminal-text.js';
+import {
+  terminalLine as sanitize,
+  terminalInput,
+  terminalMultiline
+} from '../shared/terminal-text.js';
 import { formatCost, formatDuration, formatTokens } from './display.js';
 import { resolveEditorCommand, viewInExternalEditor } from './external-editor.js';
+
+/** Lines a page scroll keeps from the previous page, as in Pi's fullscreen viewport. */
+const PAGE_SCROLL_OVERLAP = 4;
 
 const STATUS_ICONS: Record<string, string> = {
   running: '●',
@@ -44,16 +57,20 @@ export async function openWorkflowRuns(
     return;
   }
   const result = await ctx.ui.custom<{ resume?: string } | undefined>(
-    (tui, theme, _keybindings, done) =>
+    (tui, theme, keybindings, done) =>
       new WorkflowRunsBrowser(
         tui,
         theme,
+        keybindings,
         host,
         (value) => done(value),
         async (text, filename) =>
           viewInExternalEditor(tui, text, { command: resolveEditorCommand(ctx.cwd), filename }),
         runId
-      )
+      ),
+    // Fullscreen mode handles the user's `tui.altScreen.*` scroll keys before the focused
+    // component, except while an overlay has focus. Without the overlay they never reach the view.
+    { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', anchor: 'bottom-left' } }
   );
   if (result?.resume) {
     const message = resumeInstruction(result.resume);
@@ -131,21 +148,30 @@ type BrowserMode =
       kind: 'transcript';
       runId: string;
       title: string;
+      conversationId: number;
       items?: WorkflowTranscriptItem[];
       offset: number;
+      /** First line of each user message in the last rendered layout. */
+      prompts?: number[];
       back: Extract<BrowserMode, { kind: 'detail' }>;
+      /** Present while the agent runs in this session: the transcript streams and can be steered. */
+      live?: { busy: boolean; pinned: boolean; stop?: () => void };
     };
 
-export class WorkflowRunsBrowser {
+export class WorkflowRunsBrowser implements Focusable {
   #mode: BrowserMode;
   #message: { text: string; tone: 'muted' | 'warning' | 'error' } | undefined;
   #pendingDelete: string | undefined;
+  #pendingCancel: number | undefined;
   #cache: { width: number; lines: string[] } | undefined;
   #editing = false;
+  #compose: Input | undefined;
+  #focused = false;
 
   constructor(
     private readonly tui: TUI,
     private readonly theme: Theme,
+    private readonly keybindings: Pick<KeybindingsManager, 'matches' | 'getKeys'>,
     private readonly host: WorkflowHost,
     private readonly done: (result: { resume?: string } | undefined) => void,
     private readonly viewInEditor: (text: string, filename: string) => Promise<void>,
@@ -155,27 +181,58 @@ export class WorkflowRunsBrowser {
     if (initialRunId) this.#openDetail(initialRunId);
   }
 
+  get focused(): boolean {
+    return this.#focused;
+  }
+
+  set focused(value: boolean) {
+    this.#focused = value;
+    if (this.#compose) this.#compose.focused = value;
+  }
+
   handleInput(data: string): void {
     if (this.#editing) return;
+    if (this.#compose) {
+      this.#compose.handleInput(data);
+      if (this.#compose) {
+        const value = this.#compose.getValue();
+        if (terminalInput(value) !== value) this.#compose.setValue(terminalInput(value));
+      }
+      this.#refresh();
+      return;
+    }
+    if (!matchesKey(data, 'x')) this.#pendingCancel = undefined;
     const mode = this.#mode;
     if (mode.kind === 'list') this.#listInput(mode, data);
     else if (mode.kind === 'detail') this.#detailInput(mode, data);
     else this.#transcriptInput(mode, data);
   }
 
+  /** Fullscreen mode delivers wheel events; regular mode leaves them to the terminal. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const mode = this.#mode;
+    if (event.type !== 'wheel' || !event.wheelDelta || mode.kind !== 'transcript' || this.#editing)
+      return undefined;
+    if (mode.live && event.wheelDelta < 0) mode.live.pinned = false;
+    mode.offset = Math.max(0, mode.offset + event.wheelDelta);
+    this.#refresh();
+    return { handled: true };
+  }
+
   render(width: number): string[] {
     if (this.#cache?.width === width) return this.#cache.lines;
-    const rows = this.#rows();
-    const body = this.#body(width, Math.max(3, rows - 6));
+    const body = this.#body(width, this.#bodyHeight());
     const lines = [
       this.theme.fg('accent', '─'.repeat(Math.max(0, width))),
       this.#title(),
       '',
       ...body,
       '',
-      this.#message
-        ? this.theme.fg(this.#message.tone, ` ${this.#message.text}`)
-        : this.theme.fg('dim', this.#help()),
+      this.#compose
+        ? ` ${this.theme.fg('accent', 'steer ▸')} ${this.#compose.render(Math.max(1, width - 10))[0]}`
+        : this.#message
+          ? this.theme.fg(this.#message.tone, ` ${this.#message.text}`)
+          : this.theme.fg('dim', this.#help()),
       this.theme.fg('accent', '─'.repeat(Math.max(0, width)))
     ].map((line) => truncateToWidth(line, width, ''));
     this.#cache = { width, lines };
@@ -196,6 +253,10 @@ export class WorkflowRunsBrowser {
     this.#refresh();
   }
 
+  #bodyHeight(): number {
+    return Math.max(3, this.#rows() - 6);
+  }
+
   #rows(): number {
     return (this.tui as TUI & { terminal?: { rows: number } }).terminal?.rows ?? 24;
   }
@@ -207,7 +268,7 @@ export class WorkflowRunsBrowser {
         ? `${mode.runs.length} run(s)`
         : mode.kind === 'detail'
           ? mode.runId
-          : `${mode.runId} · ${mode.title}`;
+          : `${mode.runId} · ${mode.title}${mode.live ? (mode.live.busy ? ' · ● live' : ' · finished') : ''}`;
     return `${this.theme.fg('accent', ` ${this.theme.bold('/workflows')}`)}${this.theme.fg('muted', ` · ${sanitize(label)}`)}`;
   }
 
@@ -216,10 +277,35 @@ export class WorkflowRunsBrowser {
       case 'list':
         return ' ↑/↓ move • Enter inspect • r resume • a abort • d delete • g refresh • q/Esc close';
       case 'detail':
-        return ' ↑/↓ agent • Enter transcript • [/] attempt • r resume • a abort • g refresh • Esc back';
+        return ' ↑/↓ agent • Enter transcript • x cancel agent • [/] attempt • r resume • a abort • g refresh • Esc back';
       default:
-        return ' ↑/↓ scroll • PgUp/PgDn page • Home/End • e open in editor • Esc back';
+        return this.#transcriptHelp();
     }
+  }
+
+  /** Scroll hints show the keys the user has bound in Pi's fullscreen mode. */
+  #transcriptHelp(): string {
+    const pair = (first: Keybinding, second: Keybinding, label: string): string | undefined => {
+      const [a] = this.keybindings.getKeys(first);
+      const [b] = this.keybindings.getKeys(second);
+      if (!a || !b) return a || b ? `${a ?? b} ${label}` : undefined;
+      const split = a.lastIndexOf('+') + 1;
+      return b.startsWith(a.slice(0, split)) && !b.slice(split).includes('+')
+        ? `${a}/${b.slice(split)} ${label}`
+        : `${a}/${b} ${label}`;
+    };
+    const live = this.#mode.kind === 'transcript' && this.#mode.live;
+    // Esc first: a narrow terminal cuts the end of the line, and the way out must stay visible.
+    return ` ${[
+      'Esc back',
+      '↑/↓ scroll',
+      pair('tui.altScreen.pageUp', 'tui.altScreen.pageDown', 'page'),
+      pair('tui.altScreen.top', 'tui.altScreen.bottom', 'top/bottom'),
+      ...(live ? ['m steer', 'x cancel agent'] : []),
+      'e editor'
+    ]
+      .filter(Boolean)
+      .join(' • ')}`;
   }
 
   #body(width: number, height: number): string[] {
@@ -250,8 +336,13 @@ export class WorkflowRunsBrowser {
       );
     }
     if (!mode.items) return [this.theme.fg('muted', '  Loading…')];
-    const lines = renderTranscriptLines(mode.items, width);
-    mode.offset = Math.max(0, Math.min(mode.offset, Math.max(0, lines.length - height)));
+    const { lines, prompts } = transcriptLayout(mode.items, width);
+    mode.prompts = prompts;
+    const last = Math.max(0, lines.length - height);
+    if (mode.live?.pinned) mode.offset = last;
+    mode.offset = Math.max(0, Math.min(mode.offset, last));
+    // Scrolling back down to the end resumes following.
+    if (mode.live) mode.live.pinned = mode.offset >= last;
     return lines.slice(mode.offset, mode.offset + height);
   }
 
@@ -340,6 +431,17 @@ export class WorkflowRunsBrowser {
       void this.#abort(mode.runId, mode);
       return;
     }
+    if (matchesKey(data, 'x')) {
+      const row = rows[mode.selected];
+      if (row?.conversationId === undefined || row.status !== 'running') {
+        this.#notify('Only a running agent can be cancelled.');
+        return;
+      }
+      void this.#cancelAgent(mode.runId, row.conversationId, `#${row.index} ${row.label}`, () =>
+        this.#openDetail(mode.runId, mode)
+      );
+      return;
+    }
     if (matchesKey(data, Key.enter)) {
       const row = rows[mode.selected];
       if (row?.conversationId === undefined) {
@@ -350,39 +452,181 @@ export class WorkflowRunsBrowser {
         kind: 'transcript',
         runId: mode.runId,
         title: `#${row.index} ${row.label}`,
+        conversationId: row.conversationId,
         offset: 0,
-        back: mode
+        back: mode,
+        ...(row.status === 'running' && this.host.isActive(mode.runId)
+          ? { live: { busy: true, pinned: true } }
+          : {})
       };
       this.#mode = transcript;
       this.#message = undefined;
       this.#refresh();
-      void this.host
-        .transcript(mode.runId, row.conversationId)
-        .then((items) => {
-          transcript.items = items;
-          this.#refresh();
-        })
-        .catch((error) => this.#notify(errorText(error), 'error'));
+      if (transcript.live) this.#follow(transcript);
+      else this.#loadTranscript(transcript);
     }
   }
 
+  #loadTranscript(transcript: Extract<BrowserMode, { kind: 'transcript' }>): void {
+    void this.host
+      .transcript(transcript.runId, transcript.conversationId)
+      .then((items) => {
+        transcript.items = items;
+        this.#refresh();
+      })
+      .catch((error) => this.#notify(errorText(error), 'error'));
+  }
+
+  /** Stream the transcript; if the agent can no longer be followed, show it as a snapshot. */
+  #follow(transcript: Extract<BrowserMode, { kind: 'transcript' }>): void {
+    void this.host
+      .follow(transcript.runId, transcript.conversationId, ({ items, busy }) => {
+        transcript.items = items;
+        if (transcript.live) transcript.live.busy = busy;
+        this.#refresh();
+      })
+      .then((stop) => {
+        if (this.#mode === transcript && transcript.live) transcript.live.stop = stop;
+        else stop();
+      })
+      .catch(() => {
+        delete transcript.live;
+        this.#loadTranscript(transcript);
+      });
+  }
+
   #transcriptInput(mode: Extract<BrowserMode, { kind: 'transcript' }>, data: string): void {
-    const page = Math.max(1, this.#rows() - 8);
+    this.#message = undefined;
     if (matchesKey(data, Key.escape) || matchesKey(data, 'q')) {
+      mode.live?.stop?.();
       this.#mode = mode.back;
       this.#refresh();
       return;
     }
-    if (moveKey(data) !== 0) mode.offset = Math.max(0, mode.offset + moveKey(data));
-    else if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.space)) mode.offset += page;
-    else if (matchesKey(data, Key.pageUp)) mode.offset = Math.max(0, mode.offset - page);
-    else if (matchesKey(data, Key.home)) mode.offset = 0;
-    else if (matchesKey(data, Key.end)) mode.offset = Number.MAX_SAFE_INTEGER;
-    else if (matchesKey(data, 'e')) {
+    if (matchesKey(data, 'm')) {
+      this.#startCompose(mode);
+      return;
+    }
+    if (matchesKey(data, 'x')) {
+      if (!mode.live?.busy) {
+        this.#notify('Only a running agent can be cancelled.');
+        return;
+      }
+      void this.#cancelAgent(mode.runId, mode.conversationId, mode.title);
+      return;
+    }
+    if (matchesKey(data, 'e')) {
       void this.#openInEditor(mode);
       return;
-    } else return;
+    }
+    const scroll = this.#scrollRequest(data);
+    if (scroll === undefined) return;
+    if (scroll === 'bottom') {
+      mode.offset = Number.MAX_SAFE_INTEGER;
+      if (mode.live) mode.live.pinned = true;
+    } else if (scroll === 'top') {
+      mode.offset = 0;
+      if (mode.live) mode.live.pinned = false;
+    } else if (scroll.prompt) {
+      // Like Pi: move to the nearest user message above or below the first visible line.
+      const rows = mode.prompts ?? [];
+      const row =
+        scroll.prompt < 0
+          ? rows.filter((candidate) => candidate < mode.offset).at(-1)
+          : rows.find((candidate) => candidate > mode.offset);
+      if (row === undefined) return;
+      mode.offset = row;
+      if (mode.live && scroll.prompt < 0) mode.live.pinned = false;
+    } else {
+      mode.offset = Math.max(0, mode.offset + scroll.lines);
+      if (mode.live && scroll.lines < 0) mode.live.pinned = false;
+    }
     this.#refresh();
+  }
+
+  /** The scroll the user's Pi fullscreen bindings (and the arrow keys) ask for. */
+  #scrollRequest(
+    data: string
+  ):
+    | { lines: number; prompt?: never }
+    | { prompt: -1 | 1; lines?: never }
+    | 'top'
+    | 'bottom'
+    | undefined {
+    const keys = this.keybindings;
+    const height = this.#bodyHeight();
+    const page = Math.max(1, height - PAGE_SCROLL_OVERLAP);
+    const half = Math.max(1, Math.floor(height / 2));
+    if (keys.matches(data, 'tui.altScreen.top')) return 'top';
+    if (keys.matches(data, 'tui.altScreen.bottom')) return 'bottom';
+    if (keys.matches(data, 'tui.altScreen.previousPrompt')) return { prompt: -1 };
+    if (keys.matches(data, 'tui.altScreen.nextPrompt')) return { prompt: 1 };
+    if (keys.matches(data, 'tui.altScreen.pageUp')) return { lines: -page };
+    if (keys.matches(data, 'tui.altScreen.pageDown') || matchesKey(data, Key.space))
+      return { lines: page };
+    if (keys.matches(data, 'tui.altScreen.halfPageUp')) return { lines: -half };
+    if (keys.matches(data, 'tui.altScreen.halfPageDown')) return { lines: half };
+    if (keys.matches(data, 'tui.altScreen.lineUp')) return { lines: -1 };
+    if (keys.matches(data, 'tui.altScreen.lineDown')) return { lines: 1 };
+    if (moveKey(data) !== 0) return { lines: moveKey(data) };
+    return undefined;
+  }
+
+  #startCompose(mode: Extract<BrowserMode, { kind: 'transcript' }>): void {
+    if (!mode.live) {
+      this.#notify('Only an agent running in this session can be steered.');
+      return;
+    }
+    if (!mode.live.busy) {
+      this.#notify('This agent is not working right now.');
+      return;
+    }
+    const input = new Input();
+    input.focused = this.#focused;
+    input.onSubmit = (value) => {
+      this.#compose = undefined;
+      const text = terminalInput(value).trim();
+      if (text) void this.#steer(mode, text);
+    };
+    input.onEscape = () => {
+      this.#compose = undefined;
+    };
+    this.#compose = input;
+    this.#refresh();
+  }
+
+  async #steer(mode: Extract<BrowserMode, { kind: 'transcript' }>, text: string): Promise<void> {
+    try {
+      await this.host.steer(mode.runId, mode.conversationId, text);
+      this.#notify('Sent. The agent reads it after its current tool round.');
+    } catch (error) {
+      this.#notify(errorText(error), 'error');
+    }
+  }
+
+  /** The first call asks for confirmation, like delete; the second cancels. */
+  async #cancelAgent(
+    runId: string,
+    conversationId: number,
+    label: string,
+    afterwards?: () => void
+  ): Promise<void> {
+    if (this.#pendingCancel !== conversationId) {
+      this.#pendingCancel = conversationId;
+      this.#notify(
+        `Press x again to cancel ${label}. Its agent() call fails; the run continues.`,
+        'warning'
+      );
+      return;
+    }
+    this.#pendingCancel = undefined;
+    try {
+      await this.host.cancelAgent(runId, conversationId);
+      afterwards?.();
+      this.#notify(`Cancelled ${label}.`);
+    } catch (error) {
+      this.#notify(errorText(error), 'error');
+    }
   }
 
   /** The whole transcript, unwrapped and untruncated, in the user's editor. */
@@ -545,9 +789,19 @@ export function renderTranscriptLines(
   items: readonly WorkflowTranscriptItem[],
   width: number
 ): string[] {
+  return transcriptLayout(items, width).lines;
+}
+
+/** The wrapped lines, and the first line of each user message. */
+function transcriptLayout(
+  items: readonly WorkflowTranscriptItem[],
+  width: number
+): { lines: string[]; prompts: number[] } {
   const inner = Math.max(20, width - 4);
   const lines: string[] = [];
+  const prompts: number[] = [];
   for (const item of items) {
+    if (item.role === 'user') prompts.push(lines.length);
     lines.push(` ${itemLabel(item)}`);
     const text = terminalMultiline(item.text);
     const limited =
@@ -557,7 +811,7 @@ export function renderTranscriptLines(
     }
     lines.push('');
   }
-  return lines.length ? lines : ['   (empty transcript)'];
+  return { lines: lines.length ? lines : ['   (empty transcript)'], prompts };
 }
 
 /** The transcript as Markdown for an editor: a `## n. label` heading per item, text in full. */
@@ -576,7 +830,7 @@ function itemLabel(item: WorkflowTranscriptItem): string {
     item.role === 'tool-call'
       ? `→ ${item.toolName ?? 'tool'}`
       : item.role === 'tool-result'
-        ? `← ${item.toolName ?? 'tool'}${item.isError ? ' (error)' : ''}`
+        ? `← ${item.toolName ?? 'tool'}${item.running ? ' (running)' : ''}${item.isError ? ' (error)' : ''}`
         : item.role;
   return sanitize(label);
 }

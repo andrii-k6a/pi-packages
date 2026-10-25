@@ -1,6 +1,6 @@
 import type { JsonValue } from '@earendil-works/chord';
 import type { Usage } from '@earendil-works/pi-ai';
-import type { EntryRecord, LiveState } from '@earendil-works/pi-durable';
+import type { ConversationView, EntryRecord, LiveState } from '@earendil-works/pi-durable';
 import { addUsage, emptyUsage } from '../shared/usage.js';
 import type {
   WorkflowAgentSnapshot,
@@ -34,7 +34,12 @@ export type WorkflowTranscriptItem = {
   text: string;
   toolName?: string;
   isError?: boolean;
+  /** A tool call whose result is still being produced. */
+  running?: boolean;
 };
+
+/** A subagent conversation being followed: its transcript so far, and whether it is working. */
+export type FollowedTranscript = { items: WorkflowTranscriptItem[]; busy: boolean };
 
 /** Agent rows in display order. */
 export function attemptRows(attempt: Pick<WorkflowAttemptState, 'agents'>): WorkflowAgentRow[] {
@@ -165,38 +170,7 @@ export function transcriptItems(entries: readonly EntryRecord[]): WorkflowTransc
         }
         break;
       case 'pi.assistant':
-        for (const message of entry.model ?? []) {
-          const assistant = message as {
-            content?: unknown[];
-            stopReason?: string;
-            errorMessage?: string;
-          };
-          for (const part of assistant.content ?? []) {
-            const block = part as {
-              type?: string;
-              text?: string;
-              thinking?: string;
-              name?: string;
-              arguments?: unknown;
-            };
-            if (block.type === 'text' && block.text?.trim())
-              items.push({ role: 'assistant', text: block.text });
-            else if (block.type === 'thinking' && block.thinking?.trim())
-              items.push({ role: 'thinking', text: block.thinking });
-            else if (block.type === 'toolCall')
-              items.push({
-                role: 'tool-call',
-                toolName: block.name,
-                text: JSON.stringify(block.arguments ?? {})
-              });
-          }
-          if (assistant.stopReason === 'error' || assistant.stopReason === 'aborted') {
-            items.push({
-              role: 'note',
-              text: `[${assistant.stopReason}]${assistant.errorMessage ? ` ${assistant.errorMessage}` : ''}`
-            });
-          }
-        }
+        for (const message of entry.model ?? []) items.push(...assistantItems(message));
         break;
       case 'pi.tool-result':
         for (const message of entry.model ?? []) {
@@ -214,6 +188,51 @@ export function transcriptItems(entries: readonly EntryRecord[]): WorkflowTransc
     }
   }
   return items;
+}
+
+function assistantItems(message: unknown): WorkflowTranscriptItem[] {
+  const assistant = message as { content?: unknown[]; stopReason?: string; errorMessage?: string };
+  const items: WorkflowTranscriptItem[] = [];
+  for (const part of assistant.content ?? []) {
+    const block = part as {
+      type?: string;
+      text?: string;
+      thinking?: string;
+      name?: string;
+      arguments?: unknown;
+    };
+    if (block.type === 'text' && block.text?.trim())
+      items.push({ role: 'assistant', text: block.text });
+    else if (block.type === 'thinking' && block.thinking?.trim())
+      items.push({ role: 'thinking', text: block.thinking });
+    else if (block.type === 'toolCall')
+      items.push({
+        role: 'tool-call',
+        toolName: block.name,
+        text: JSON.stringify(block.arguments ?? {})
+      });
+  }
+  if (assistant.stopReason === 'error' || assistant.stopReason === 'aborted') {
+    items.push({
+      role: 'note',
+      text: `[${assistant.stopReason}]${assistant.errorMessage ? ` ${assistant.errorMessage}` : ''}`
+    });
+  }
+  return items;
+}
+
+/** The committed transcript of a conversation plus the reply and tool output still in flight. */
+export function followedTranscript(
+  view: Pick<ConversationView, 'entries' | 'docs'>
+): FollowedTranscript {
+  const live = view.docs['pi.live'] as LiveState | undefined;
+  const items = transcriptItems(view.entries);
+  if (live?.generation?.message) items.push(...assistantItems(live.generation.message));
+  for (const tool of live?.tools ?? []) {
+    if (tool.status === 'running' && tool.output)
+      items.push({ role: 'tool-result', toolName: tool.name, text: tool.output, running: true });
+  }
+  return { items, busy: live?.run !== undefined };
 }
 
 /** Listing summary of a run, derived from its latest attempt. */

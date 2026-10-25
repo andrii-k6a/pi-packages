@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import type { ExtensionCommandContext, Theme } from '@earendil-works/pi-coding-agent';
-import type { TUI } from '@earendil-works/pi-tui';
+import { KeybindingsManager, type TUI, TUI_KEYBINDINGS } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { WorkflowHost } from '../../src/durable/host.js';
-import type { WorkflowRunReport } from '../../src/durable/report.js';
+import type { FollowedTranscript, WorkflowRunReport } from '../../src/durable/report.js';
 import type { WorkflowRunIndex } from '../../src/durable/store.js';
 import { openWorkflowRuns, WorkflowRunsBrowser } from '../../src/pi/runs-command.js';
 import { emptyUsage } from '../../src/shared/usage.js';
@@ -18,6 +18,16 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+const defaultKeys = new KeybindingsManager(TUI_KEYBINDINGS);
+// A user's fullscreen scroll bindings, as configured in keybindings.json.
+const userKeys = new KeybindingsManager(TUI_KEYBINDINGS, {
+  'tui.altScreen.pageUp': 'ctrl+shift+k',
+  'tui.altScreen.pageDown': 'ctrl+shift+j',
+  'tui.altScreen.top': 'ctrl+shift+h',
+  'tui.altScreen.bottom': 'ctrl+shift+l'
+});
+const chord = (letter: string) => `\u001b[${letter.charCodeAt(0)};6u`;
 
 const index: WorkflowRunIndex = {
   version: 1,
@@ -152,6 +162,7 @@ test('/workflows still uses the browser in TUI mode', async () => {
   const mocked = setup('tui');
   await mocked.open();
   expect(mocked.ui.custom).toHaveBeenCalledTimes(1);
+  expect(mocked.ui.custom.mock.calls[0][1]).toMatchObject({ overlay: true });
   expect(mocked.ui.notify).not.toHaveBeenCalled();
   expect(mocked.pi.sendMessage).not.toHaveBeenCalled();
   expect(fs.writeFileSync).not.toHaveBeenCalled();
@@ -198,6 +209,7 @@ test.each([18, 24, 40])(
     const browser = new WorkflowRunsBrowser(
       { terminal: { rows: terminalRows }, requestRender() {} } as unknown as TUI,
       { fg: (_color, value) => value, bold: (value) => value } as Theme,
+      defaultKeys,
       { list: () => [], report: async () => largeReport } as unknown as WorkflowHost,
       () => {},
       async () => {},
@@ -254,6 +266,7 @@ function transcriptBrowser(viewInEditor: (text: string, filename: string) => Pro
   const browser = new WorkflowRunsBrowser(
     { terminal: { rows: 24 }, requestRender() {} } as unknown as TUI,
     { fg: (_color, value) => value, bold: (value) => value } as Theme,
+    defaultKeys,
     { list: () => [], report: async () => withTranscript, transcript } as unknown as WorkflowHost,
     () => {},
     viewInEditor,
@@ -303,4 +316,330 @@ test('a second e while the editor is open does not start another editor', async 
   browser.handleInput('e');
   browser.handleInput('e');
   assert.equal(view.mock.calls.length, 1);
+});
+
+function liveBrowser(options: { follow?: 'reject'; keybindings?: KeybindingsManager } = {}) {
+  const keybindings = options.keybindings ?? defaultKeys;
+  const running: WorkflowRunReport = {
+    ...report,
+    status: 'running',
+    active: true,
+    attempts: [
+      {
+        number: 1,
+        taskId: 1,
+        status: 'running',
+        script: '',
+        scriptHash: 'test',
+        startedAt: 1,
+        phases: [],
+        logs: [],
+        agents: {
+          a: {
+            key: 'a',
+            index: 3,
+            label: 'audit',
+            status: 'running',
+            conversationId: 7,
+            prompt: 'Prompt'
+          }
+        }
+      }
+    ]
+  };
+  const stop = vi.fn();
+  const sink: { push?: (followed: FollowedTranscript) => void } = {};
+  const host = {
+    list: () => [],
+    report: async () => running,
+    isActive: () => true,
+    follow: vi.fn(
+      async (_runId: string, _id: number, listener: (f: FollowedTranscript) => void) => {
+        if (options.follow === 'reject') throw new Error('run closed');
+        sink.push = listener;
+        return stop;
+      }
+    ),
+    transcript: vi.fn(async () => [{ role: 'user' as const, text: 'from snapshot' }]),
+    steer: vi.fn(async () => {}),
+    cancelAgent: vi.fn(async () => {})
+  };
+  const browser = new WorkflowRunsBrowser(
+    { terminal: { rows: 24 }, requestRender() {} } as unknown as TUI,
+    { fg: (_color, value) => value, bold: (value) => value } as Theme,
+    keybindings,
+    host as unknown as WorkflowHost,
+    () => {},
+    async () => {},
+    report.runId
+  );
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const type = (text: string) => {
+    for (const char of text) browser.handleInput(char);
+  };
+  const lines = (count: number, busy = true): FollowedTranscript => ({
+    busy,
+    items: Array.from({ length: count }, (_, i) => ({
+      role: 'assistant' as const,
+      text: `line ${i}`
+    }))
+  });
+  const text = () => browser.render(100).join('\n');
+  const follow = async () => {
+    await settle();
+    browser.handleInput('\r');
+    await settle();
+  };
+  return { browser, host, stop, sink, settle, type, lines, text, follow };
+}
+
+test('following a running agent streams its transcript, stays at the tail, and stops on leaving', async () => {
+  const { browser, stop, sink, lines, text, follow } = liveBrowser();
+  await follow();
+  sink.push?.(lines(30));
+  assert.match(text(), /● live/);
+  assert.match(text(), /line 29/);
+  assert.doesNotMatch(text(), /line 0\b/);
+
+  sink.push?.(lines(31));
+  assert.match(text(), /line 30/, 'new output scrolls into view while following');
+
+  browser.handleInput('k');
+  sink.push?.(lines(33));
+  assert.doesNotMatch(text(), /line 32/, 'scrolling up stops following');
+  browser.handleInput('\u001b[1;5F');
+  assert.match(text(), /line 32/, 'ctrl+end, the default bottom binding, resumes following');
+
+  sink.push?.(lines(33, false));
+  assert.match(text(), /finished/);
+  browser.handleInput('\u001b');
+  expect(stop).toHaveBeenCalledTimes(1);
+});
+
+test('m sends a steer to the followed agent, and Esc abandons the message', async () => {
+  const { browser, host, sink, lines, text, type, settle, follow } = liveBrowser();
+  await follow();
+  sink.push?.(lines(2));
+
+  browser.handleInput('m');
+  type('Use pnpm');
+  assert.match(text(), /steer ▸ .*Use pnpm/);
+  browser.handleInput('\u001b');
+  expect(host.steer).not.toHaveBeenCalled();
+  assert.doesNotMatch(text(), /steer ▸/);
+
+  browser.handleInput('m');
+  type('  Use pnpm  ');
+  browser.handleInput('\r');
+  await settle();
+  expect(host.steer).toHaveBeenCalledWith('run-1', 7, 'Use pnpm');
+  assert.match(text(), /Sent\./);
+});
+
+test('m is refused when the agent is idle or the transcript is only a snapshot', async () => {
+  const live = liveBrowser();
+  await live.follow();
+  live.sink.push?.(live.lines(2, false));
+  live.browser.handleInput('m');
+  assert.match(live.text(), /not working right now/);
+
+  const snapshot = liveBrowser({ follow: 'reject' });
+  await snapshot.follow();
+  await snapshot.settle();
+  snapshot.browser.handleInput('m');
+  assert.match(snapshot.text(), /Only an agent running in this session can be steered/);
+  expect(snapshot.host.steer).not.toHaveBeenCalled();
+});
+
+test('x cancels the followed agent only when pressed twice in a row', async () => {
+  const { browser, host, sink, lines, text, settle, follow } = liveBrowser();
+  await follow();
+  sink.push?.(lines(2));
+
+  browser.handleInput('x');
+  assert.match(text(), /Press x again to cancel #3 audit/);
+  browser.handleInput('j');
+  browser.handleInput('x');
+  expect(host.cancelAgent).not.toHaveBeenCalled();
+
+  browser.handleInput('x');
+  await settle();
+  expect(host.cancelAgent).toHaveBeenCalledWith('run-1', 7);
+  assert.match(text(), /Cancelled #3 audit/);
+});
+
+test('x on a running agent in the run view cancels it after confirmation', async () => {
+  const { browser, host, text, settle } = liveBrowser();
+  await settle();
+  browser.handleInput('x');
+  browser.handleInput('x');
+  await settle();
+  expect(host.cancelAgent).toHaveBeenCalledWith('run-1', 7);
+  assert.match(text(), /Cancelled #3 audit/);
+});
+
+test('an agent that cannot be followed falls back to its stored transcript', async () => {
+  const { browser, host, settle, follow } = liveBrowser({ follow: 'reject' });
+  await follow();
+  await settle();
+  expect(host.transcript).toHaveBeenCalledWith('run-1', 7);
+  assert.match(browser.render(100).join('\n'), /from snapshot/);
+  assert.doesNotMatch(browser.render(100).join('\n'), /● live/);
+});
+
+const wheel = (wheelDelta: number) =>
+  ({ type: 'wheel', button: 'none', wheelDelta }) as unknown as Parameters<
+    WorkflowRunsBrowser['handleMouse']
+  >[0];
+
+test('the mouse wheel scrolls a live transcript, leaves the tail, and returns to it at the bottom', async () => {
+  const { browser, sink, lines, text, follow } = liveBrowser();
+  await follow();
+  sink.push?.(lines(30));
+  assert.doesNotMatch(text(), /line 23\b/);
+
+  assert.deepEqual(browser.handleMouse(wheel(-3)), { handled: true });
+  assert.match(text(), /line 23\b/);
+  assert.doesNotMatch(text(), /line 29\b/);
+
+  sink.push?.(lines(31));
+  assert.doesNotMatch(text(), /line 30\b/, 'scrolled away from the tail, new output stays below');
+
+  browser.handleMouse(wheel(100));
+  assert.match(text(), /line 30\b/);
+  sink.push?.(lines(32));
+  assert.match(text(), /line 31\b/, 'the tail is followed again');
+});
+
+test('the mouse wheel scrolls a snapshot transcript and is ignored outside transcripts', async () => {
+  const { browser, settle } = transcriptBrowser(async () => {});
+  await settle();
+  assert.equal(browser.handleMouse(wheel(-1)), undefined, 'the run view does not scroll');
+  browser.handleInput('\r');
+  await settle();
+  assert.match(browser.render(100).join('\n'), /^ user$/m);
+  assert.deepEqual(browser.handleMouse(wheel(2)), { handled: true });
+  assert.doesNotMatch(browser.render(100).join('\n'), /^ user$/m);
+  assert.equal(
+    browser.handleMouse({ type: 'click', button: 'left' } as unknown as Parameters<
+      WorkflowRunsBrowser['handleMouse']
+    >[0]),
+    undefined
+  );
+});
+
+test("the user's fullscreen scroll bindings scroll a live transcript, and bottom follows it again", async () => {
+  const { sink, lines, text, follow, browser } = liveBrowser({ keybindings: userKeys });
+  await follow();
+  sink.push?.(lines(30));
+  assert.match(text(), /line 29\b/);
+
+  browser.handleInput(chord('h'));
+  assert.match(text(), /line 0\b/);
+  assert.doesNotMatch(text(), /line 29\b/);
+
+  const body = () => browser.render(100).slice(3, 21);
+  const firstPage = body();
+  browser.handleInput(chord('j'));
+  assert.deepEqual(
+    body().slice(0, 4),
+    firstPage.slice(-4),
+    'a page keeps the last 4 lines of the previous one, as in Pi'
+  );
+  assert.doesNotMatch(text(), /line 0\b/);
+
+  browser.handleInput(chord('l'));
+  assert.match(text(), /line 29\b/);
+  sink.push?.(lines(31));
+  assert.match(text(), /line 30\b/, 'bottom resumes following');
+
+  browser.handleInput(chord('k'));
+  sink.push?.(lines(33));
+  assert.doesNotMatch(text(), /line 32\b/, 'page up leaves the tail');
+});
+
+test('scroll bindings that are not configured do nothing', async () => {
+  const { sink, lines, text, follow, browser } = liveBrowser();
+  await follow();
+  sink.push?.(lines(30));
+  browser.handleInput(chord('h'));
+  assert.match(text(), /line 29\b/);
+});
+
+test('transcripts follow the keys bound in Pi: half pages, lines, and no key that Pi has unbound', async () => {
+  const keys = new KeybindingsManager(TUI_KEYBINDINGS, {
+    ...userKeys.getUserBindings(),
+    'tui.altScreen.pageUp': [],
+    'tui.altScreen.halfPageDown': 'ctrl+d',
+    'tui.altScreen.lineDown': 'ctrl+n'
+  });
+  const { browser, sink, lines, text, follow } = liveBrowser({ keybindings: keys });
+  await follow();
+  sink.push?.(lines(30));
+  browser.handleInput(chord('h'));
+  const firstLine = () => browser.render(100)[3];
+  assert.equal(firstLine(), ' assistant');
+
+  browser.handleInput('\u0004');
+  assert.doesNotMatch(text(), /line 2\b/, 'half a page is 9 lines');
+  assert.match(text(), /line 3\b/);
+
+  browser.handleInput(chord('h'));
+  browser.handleInput('\u000e');
+  assert.equal(firstLine(), '   line 0', 'one line down');
+
+  browser.handleInput('\u001b[5~');
+  assert.equal(firstLine(), '   line 0', 'PgUp is not bound to anything any more');
+});
+
+test('ctrl+up and ctrl+down jump between user messages, as in the parent session', async () => {
+  const { browser, sink, text, follow } = liveBrowser();
+  await follow();
+  const assistant = (count: number, from: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      role: 'assistant' as const,
+      text: `step ${from + i}`
+    }));
+  sink.push?.({
+    busy: true,
+    items: [
+      { role: 'user', text: 'first prompt' },
+      ...assistant(10, 0),
+      { role: 'user', text: 'second prompt' },
+      ...assistant(10, 10)
+    ]
+  });
+  assert.doesNotMatch(text(), /second prompt/);
+
+  browser.handleInput('\u001b[1;5A');
+  assert.match(text(), /second prompt/, 'previous message from the tail');
+  assert.doesNotMatch(text(), /first prompt/);
+  browser.handleInput('\u001b[1;5A');
+  assert.match(text(), /first prompt/);
+  browser.handleInput('\u001b[1;5A');
+  assert.match(text(), /first prompt/, 'nothing earlier: stays');
+  browser.handleInput('\u001b[1;5B');
+  assert.match(text(), /second prompt/);
+});
+
+test('the footer shows the keys bound in Pi', async () => {
+  const user = liveBrowser({ keybindings: userKeys });
+  await user.follow();
+  user.sink.push?.(user.lines(2));
+  assert.match(user.text(), /ctrl\+shift\+k\/j page/);
+  assert.match(user.text(), /ctrl\+shift\+h\/l top\/bottom/);
+
+  const partial = liveBrowser({
+    keybindings: new KeybindingsManager(TUI_KEYBINDINGS, { 'tui.altScreen.pageUp': [] })
+  });
+  await partial.follow();
+  partial.sink.push?.(partial.lines(2));
+  assert.match(partial.text(), /• pageDown page •/, 'a half-bound pair still shows its key');
+
+  const defaults = liveBrowser();
+  await defaults.follow();
+  defaults.sink.push?.(defaults.lines(2));
+  assert.match(defaults.text(), /^ Esc back • /m, 'the way out comes first, so it is never cut');
+  assert.match(defaults.text(), /pageUp\/pageDown page/);
+  assert.match(defaults.text(), /ctrl\+home\/end top\/bottom/);
 });

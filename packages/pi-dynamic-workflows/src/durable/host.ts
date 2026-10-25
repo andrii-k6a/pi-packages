@@ -3,6 +3,7 @@ import type { JsonValue } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, type Models, type Usage } from '@earendil-works/pi-ai';
 import {
+  type ConversationView,
   type Cursor,
   createRegistry,
   defineExtension,
@@ -45,6 +46,8 @@ import { type OpenRun, ownOpenRun, type RunExtras } from './open-run.js';
 import type { WorkflowExtensionProvider, WorkflowProviderLease } from './providers.js';
 import {
   attemptSnapshot,
+  type FollowedTranscript,
+  followedTranscript,
   runIndex,
   transcriptItems,
   type WorkflowAttemptReport,
@@ -509,6 +512,60 @@ export class WorkflowHost {
       }
       return items;
     });
+  }
+
+  /**
+   * Stream a running subagent's conversation to `listener`, starting with its current state.
+   * Only for a run this process drives. Returns the function that stops the stream.
+   */
+  async follow(
+    runId: string,
+    conversationId: number,
+    listener: (followed: FollowedTranscript) => void
+  ): Promise<() => void> {
+    const { conversation } = await this.#subagent(runId, conversationId);
+    const view = await conversation.viewState(context);
+    const unsubscribe = view.subscribe((value: ConversationView) =>
+      listener(followedTranscript(value))
+    );
+    return () => {
+      unsubscribe();
+      view.dispose();
+    };
+  }
+
+  /** Send a message that a running subagent reads after its current tool round. */
+  async steer(runId: string, conversationId: number, text: string): Promise<void> {
+    const message = text.trim();
+    if (!message) throw new Error('nothing to send');
+    const { open, conversation } = await this.#subagent(runId, conversationId);
+    // A steer sent to an idle conversation would start a new run that nobody waits for.
+    const live = await open.harness.snapshot(LiveDoc, conversationId as never, context);
+    if (!live?.run) throw new Error('this agent is not working right now');
+    await conversation.submit({ type: 'input', content: message, whenBusy: 'steer' }, context);
+  }
+
+  /** Stop one running subagent. Its `agent()` call fails (null in the script); the run continues. */
+  async cancelAgent(runId: string, conversationId: number): Promise<void> {
+    const { conversation } = await this.#subagent(runId, conversationId);
+    await conversation.abort(context);
+  }
+
+  /** The conversation of a subagent that is running in a run this process drives. */
+  async #subagent(runId: string, conversationId: number) {
+    assertValidRunId(runId);
+    const open = this.#open.get(runId);
+    if (!open) throw new Error(`workflow run ${runId} is not running in this session`);
+    const run = await readRun(open.harness);
+    const latest = run.attempts.at(-1);
+    const attempt = latest === undefined ? undefined : await readAttempt(open.harness, latest);
+    const row = Object.values(attempt?.agents ?? {}).find(
+      (candidate) => candidate.conversationId === conversationId
+    );
+    if (row?.status !== 'running') throw new Error('this agent is not running');
+    const conversation = await open.harness.conversation(conversationId as never, context);
+    if (!conversation) throw new Error(`conversation ${conversationId} not found in run ${runId}`);
+    return { open, conversation };
   }
 
   delete(runId: string): void {

@@ -4,6 +4,7 @@ import { test } from 'vitest';
 import type { WorkflowAttemptState } from '../../src/durable/docs.js';
 import {
   attemptSnapshot,
+  followedTranscript,
   liveActivity,
   runIndex,
   transcriptItems,
@@ -258,6 +259,37 @@ test('transcriptItems maps durable entries to readable roles', () => {
     { role: 'tool-result', toolName: 'read', isError: true, text: 'ENOENT' },
     { role: 'note', text: '[error] overloaded' }
   ]);
+});
+
+test('followedTranscript appends the reply and tool output still in flight', () => {
+  const entries = [
+    { id: 1, conversationId: 2, kind: 'pi.user', model: [{ role: 'user', content: 'do it' }] }
+  ] as unknown as EntryRecord[];
+  const live = {
+    run: { taskId: 1, inputs: [1] },
+    generation: {
+      attempt: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Running tests' }] }
+    },
+    tools: [
+      { callId: 'a', name: 'bash', status: 'running', output: '3 passed' },
+      { callId: 'b', name: 'read', status: 'running' },
+      { callId: 'c', name: 'bash', status: 'done', output: 'finished' }
+    ]
+  } as unknown as LiveState;
+
+  assert.deepEqual(followedTranscript({ entries, docs: { 'pi.live': live } }), {
+    busy: true,
+    items: [
+      { role: 'user', text: 'do it' },
+      { role: 'assistant', text: 'Running tests' },
+      { role: 'tool-result', toolName: 'bash', text: '3 passed', running: true }
+    ]
+  });
+  assert.deepEqual(followedTranscript({ entries, docs: {} }), {
+    busy: false,
+    items: [{ role: 'user', text: 'do it' }]
+  });
 });
 
 test('runIndex summarizes the latest attempt for listings', () => {

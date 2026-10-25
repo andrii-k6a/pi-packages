@@ -970,3 +970,165 @@ return await agent('x', { schema: { type: 'array', items: { type: 'string' } } }
   assert.deepEqual(prompts, []);
   await handle.close();
 });
+
+async function agentConversation(runs: WorkflowHost, runId: string, label: string) {
+  const report = await runs.report(runId);
+  const row = Object.values(report.attempts.at(-1)?.agents ?? {}).find(
+    (candidate) => candidate.label === label
+  );
+  assert.ok(row?.conversationId !== undefined, `agent ${label} has a conversation`);
+  return row.conversationId;
+}
+
+test('a running subagent can be followed live and steered, and the steer reaches its next request', async () => {
+  const release = gate();
+  respond(async ({ userMessages }) => {
+    if (userMessages.length > 1) return text(`steered: ${userMessages[1]}`);
+    await release.opened;
+    return fauxAssistantMessage([fauxToolCall('read', { path: 'notes.txt' })], {
+      stopReason: 'toolUse'
+    });
+  });
+  const runs = host();
+  const handle = await runs.start(
+    { script: `${AUDIT_HEADER}\nreturn await agent('work', { label: 'worker' })`, cwd },
+    binding()
+  );
+  await until(() => prompts.includes('work'));
+  const conversationId = await agentConversation(runs, handle.runId, 'worker');
+
+  const seen: Array<{ texts: string[]; busy: boolean }> = [];
+  const stop = await runs.follow(handle.runId, conversationId, ({ items, busy }) =>
+    seen.push({ texts: items.map((item) => item.text), busy })
+  );
+  await runs.steer(handle.runId, conversationId, '  Use pnpm, not npm  ');
+  release.open();
+  const outcome = await handle.wait();
+
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.equal(outcome.value, 'steered: Use pnpm, not npm');
+  await until(() => seen.at(-1)?.busy === false);
+  stop();
+  const last = seen.at(-1);
+  assert.ok(seen[0].busy, 'the first delivery is the current state of a working agent');
+  assert.deepEqual(
+    [last?.texts.includes('work'), last?.texts.includes('Use pnpm, not npm')],
+    [true, true]
+  );
+  assert.equal(last?.texts.at(-1), 'steered: Use pnpm, not npm');
+  await handle.close();
+});
+
+test('cancelling one subagent fails only its agent() call, and the run completes', async () => {
+  respond(async ({ prompt, signal }) => {
+    if (prompt === 'stuck') {
+      await new Promise<never>((_, reject) =>
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      );
+    }
+    return text(`ok ${prompt}`);
+  });
+  const runs = host();
+  const handle = await runs.start(
+    {
+      script: `${AUDIT_HEADER}
+const results = await parallel([() => agent('stuck', { label: 'stuck' }), () => agent('fine', { label: 'fine' })])
+return results`,
+      cwd
+    },
+    binding()
+  );
+  await until(() => prompts.includes('stuck') && prompts.includes('fine'));
+  const conversationId = await agentConversation(runs, handle.runId, 'stuck');
+  await until(async () => {
+    const report = await runs.report(handle.runId);
+    return Object.values(report.attempts[0].agents).some(
+      (row) => row.label === 'fine' && row.status === 'done'
+    );
+  });
+
+  await runs.cancelAgent(handle.runId, conversationId);
+  const outcome = await handle.wait();
+
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status !== 'completed') return;
+  assert.deepEqual(outcome.value, [null, 'ok fine']);
+  const stuck = outcome.snapshot.agents.find((agent) => agent.label === 'stuck');
+  assert.equal(stuck?.status, 'error');
+  await assert.rejects(runs.cancelAgent(handle.runId, conversationId), /agent is not running/);
+  await assert.rejects(runs.steer(handle.runId, conversationId, 'hi'), /agent is not running/);
+  await handle.close();
+  await assert.rejects(
+    runs.steer(handle.runId, conversationId, 'hi'),
+    /not running in this session/
+  );
+});
+
+const CANCELLED_AGENT_SCRIPT = `${AUDIT_HEADER}
+const first = await parallel([() => agent('stuck', { label: 'stuck' }), () => agent('fine', { label: 'fine' })])
+const last = await agent('last', { label: 'last' })
+return { first, last }`;
+
+async function startWithCancelledAgent(runs: WorkflowHost, hold: ReturnType<typeof gate>) {
+  let unstuck = false;
+  respond(async ({ prompt, signal }) => {
+    if (prompt === 'stuck' && !unstuck) {
+      await new Promise<never>((_, reject) =>
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      );
+    }
+    if (prompt === 'last') {
+      await new Promise<void>((resolve, reject) => {
+        hold.opened.then(resolve);
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    }
+    return text(`ok ${prompt}`);
+  });
+  const handle = await runs.start({ script: CANCELLED_AGENT_SCRIPT, cwd }, binding());
+  await until(() => prompts.includes('stuck') && prompts.includes('fine'));
+  await runs.cancelAgent(handle.runId, await agentConversation(runs, handle.runId, 'stuck'));
+  await until(() => prompts.includes('last'));
+  prompts = [];
+  unstuck = true;
+  return handle;
+}
+
+test('resuming in place keeps a cancelled agent cancelled', async () => {
+  const hold = gate();
+  const runs = host();
+  const handle = await startWithCancelledAgent(runs, hold);
+  await handle.close();
+
+  hold.open();
+  const resumed = await runs.resume(handle.runId, {}, binding());
+  const outcome = await resumed.wait();
+  await resumed.close();
+
+  assert.equal(resumed.mode, 'continued');
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed')
+    assert.deepEqual(outcome.value, { first: [null, 'ok fine'], last: 'ok last' });
+  assert.ok(!prompts.includes('stuck'));
+});
+
+test('a new attempt after an abort runs a cancelled agent again and reuses completed ones', async () => {
+  const hold = gate();
+  const runs = host();
+  const handle = await startWithCancelledAgent(runs, hold);
+  await handle.abort();
+  await handle.wait();
+  await handle.close();
+
+  hold.open();
+  const retried = await runs.resume(handle.runId, {}, binding());
+  const outcome = await retried.wait();
+  await retried.close();
+
+  assert.equal(retried.mode, 'retried');
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed')
+    assert.deepEqual(outcome.value, { first: ['ok stuck', 'ok fine'], last: 'ok last' });
+  assert.ok(prompts.includes('stuck'));
+  assert.ok(!prompts.includes('fine'));
+});
