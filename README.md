@@ -20,10 +20,13 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [defuddle](./skills/defuddle/) | Skill | Read static web pages as clean Markdown |
 | [crawl4ai](./skills/crawl4ai/) | Skill | Read rendered pages and crawl sites with a local browser |
 | [assistant](./prompts/assistant.md) | Prompt | Treat the session as a general-purpose personal assistant |
+| [discuss](./prompts/discuss.md) | Prompt | Compare options without changing files or external state |
+| [implement](./prompts/implement.md) | Prompt | Complete the agreed task and check the result |
+| [teach](./prompts/teach.md) | Prompt | Explain one practical step at a time |
 
 Each extension has its own README with setup instructions, usage, and configuration details.
 Skills document their usage in `SKILL.md`.
-Prompt templates are single Markdown files in `prompts/`; the filename is the slash command.
+Prompt templates are single Markdown files in `prompts/`. The filename is the slash command.
 
 ## Install All
 
