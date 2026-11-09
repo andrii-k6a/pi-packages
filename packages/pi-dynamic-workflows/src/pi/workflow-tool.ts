@@ -14,12 +14,14 @@ import {
   WorkflowHost,
   type WorkflowRunBinding
 } from '../durable/host.js';
+import { attemptSnapshot } from '../durable/report.js';
 import { capturePromptContext } from '../durable/subagent.js';
 import type { WorkflowProfile } from '../profiles/contracts.js';
 import { createWorkflowProfileResolver } from '../profiles/routing.js';
 import { terminalLine, terminalMultiline } from '../shared/terminal-text.js';
 import { hasUsage } from '../shared/usage.js';
 import { compactSnapshot, type WorkflowSnapshot } from '../workflow/snapshot.js';
+import type { WorkflowBackgroundRuns } from './background.js';
 import { createToolUpdateWorkflowDisplay, renderWorkflowText } from './display.js';
 
 const workflowToolSchema = Type.Object({
@@ -51,7 +53,20 @@ const workflowToolSchema = Type.Object({
       description:
         'Run id of an earlier workflow to continue or retry; completed agent() results are reused.'
     })
-  )
+  ),
+  background: Type.Optional(
+    Type.Boolean({
+      description:
+        'Default false. Return a run id without waiting. TUI/RPC only. Continue other work, do not poll. A follow-up requests result retrieval when ready. Session changes interrupt the run safely.'
+    })
+  ),
+  status: Type.Optional(Type.String({ description: 'Inspect this run id without starting work.' })),
+  result: Type.Optional(
+    Type.String({
+      description: 'Retrieve this completed run id and its usage. Does not resume work.'
+    })
+  ),
+  cancel: Type.Optional(Type.String({ description: 'Cancel this run id. Completed work is kept.' }))
 });
 
 export type WorkflowToolInput = {
@@ -59,6 +74,10 @@ export type WorkflowToolInput = {
   args?: Record<string, unknown>;
   resume?: string;
   tokenBudget?: number;
+  background?: boolean;
+  status?: string;
+  result?: string;
+  cancel?: string;
 };
 
 const workflowDisplayOptions = {
@@ -75,6 +94,8 @@ export interface WorkflowToolOptions {
   profiles?: readonly WorkflowProfile[];
   /** Durable runtime that owns workflow runs; one per extension instance. */
   host?: WorkflowHost;
+  /** Session-scoped background execution and result-ready delivery. */
+  backgroundRuns?: WorkflowBackgroundRuns;
   /** Override project-context capture for subagent prompts (tests, embedding hosts). */
   promptContext?: (cwd: string) => Promise<WorkflowPromptContextState>;
 }
@@ -106,6 +127,7 @@ export function createWorkflowTool(
       'Pass plain JSON Schema via opts.schema for validated structured agent() output; root type must be "object".',
       'budget.remaining() is Infinity unless tokenBudget is set (soft limit).',
       "After failure/abort/interruption, resume: '<run id>' (plus a fixed script if needed); identical completed agent calls are reused.",
+      'Use background: true if other work can proceed; else wait for it.',
       ...profileGuidelines
     ],
     parameters: workflowToolSchema,
@@ -116,47 +138,102 @@ export function createWorkflowTool(
       return normalizeWorkflowToolArgs(args);
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const script =
-        params.script === undefined ? undefined : normalizeWorkflowScript(params.script);
-      const resume = params.resume?.trim() || undefined;
+      params = normalizeWorkflowToolArgs(params);
+      if (signal?.aborted) throw new Error('Workflow was aborted');
+      const query = params.status ?? params.result ?? params.cancel;
+      if (query) {
+        const cancelled = params.cancel ? await host.abort(query) : undefined;
+        const ready = params.result ? await options.backgroundRuns?.prepareResult(query) : true;
+        const live = options.backgroundRuns?.snapshot(query);
+        if (live && (!params.result || ready === false)) {
+          return workflowStatusResult(live, cancelled);
+        }
+        const report = await host.report(query);
+        const attempt = report.attempts.at(-1);
+        if (!attempt) throw new Error(`workflow run ${query} has no attempts`);
+        if (!params.result || report.status !== 'completed') {
+          return workflowStatusResult(
+            { ...attemptSnapshot(report.run, attempt, Date.now()), status: report.status },
+            cancelled,
+            attempt.error
+          );
+        }
+      }
+      const script = params.script;
+      const resume = params.result ?? params.resume?.trim();
       if (!script && !resume) {
         throw new Error('workflow requires `script`, or `resume` with an earlier run id');
       }
-      if (signal?.aborted) throw new Error('Workflow was aborted');
-      if (!ctx.model) {
+      if (params.background) {
+        if (ctx.mode === 'print' || ctx.mode === 'json') {
+          throw new Error('Background workflows require TUI or RPC mode. Use background: false.');
+        }
+        if (!options.backgroundRuns) {
+          throw new Error('Background workflows require the Pi extension background runner');
+        }
+      }
+      if (!ctx.model && !params.result) {
         throw new Error(
           'workflow requires an active session model for its subagents; select one with /model'
         );
       }
 
-      const binding = createWorkflowRunBinding(ctx, { ...options, signal, toolCallId });
+      const binding = createWorkflowRunBinding(ctx, {
+        ...options,
+        signal,
+        ...(params.background ? {} : { toolCallId })
+      });
       let handle: WorkflowAttemptHandle;
       try {
-        handle = resume
-          ? await host.resume(
-              resume,
-              {
-                script,
-                args: params.args,
-                concurrency: options.concurrency,
-                tokenBudget: params.tokenBudget
-              },
-              binding
-            )
-          : await host.start(
-              {
-                script: script as string,
-                args: params.args,
-                cwd: options.cwd ?? ctx.cwd,
-                concurrency: options.concurrency,
-                tokenBudget: params.tokenBudget
-              },
-              binding
-            );
+        handle = params.result
+          ? await host.result(params.result, binding)
+          : resume
+            ? await host.resume(
+                resume,
+                {
+                  script,
+                  args: params.args,
+                  concurrency: options.concurrency,
+                  tokenBudget: params.tokenBudget
+                },
+                binding
+              )
+            : await host.start(
+                {
+                  script: script as string,
+                  args: params.args,
+                  cwd: options.cwd ?? ctx.cwd,
+                  concurrency: options.concurrency,
+                  tokenBudget: params.tokenBudget
+                },
+                binding
+              );
       } catch (error) {
         // Opening a run can wait on providers (for example MCP servers); Esc ends that wait.
         if (signal?.aborted) throw new Error('Workflow was aborted');
         throw error;
+      }
+
+      if (params.background) {
+        try {
+          if (signal?.aborted) {
+            await handle.abort();
+            throw new Error(`Workflow was aborted (run ${handle.runId})`);
+          }
+          options.backgroundRuns?.start(handle, ctx);
+        } catch (error) {
+          await handle.close();
+          throw error;
+        }
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Workflow started in the background. Run id: ${handle.runId}. Continue other work or end this turn. A follow-up will request result retrieval when ready. Do not poll. Use { "status": "${handle.runId}" } to inspect or { "cancel": "${handle.runId}" } to stop.`
+            }
+          ],
+          details: { runId: handle.runId, attempt: handle.attemptNumber, background: true }
+        };
       }
 
       const display = createToolUpdateWorkflowDisplay(onUpdate, undefined, workflowDisplayOptions);
@@ -221,18 +298,23 @@ export function createWorkflowTool(
         ],
         details: {
           ...compactSnapshot(outcome.snapshot),
+          resultDelivered: true,
           ...(outcome.usageReceipt ? { usageReceipt: outcome.usageReceipt } : {})
         }
       };
     },
     renderCall(args, theme) {
-      const resume = (args as WorkflowToolInput | undefined)?.resume;
-      const title = theme.fg('toolTitle', theme.bold('workflow'));
-      return new Text(
-        resume ? `${title} ${theme.fg('muted', `resume ${terminalLine(resume)}`)}` : title,
-        0,
-        0
+      const input = args as WorkflowToolInput | undefined;
+      const action = (['status', 'result', 'cancel', 'resume'] as const).find(
+        (key) => input?.[key]
       );
+      const title = theme.fg('toolTitle', theme.bold('workflow'));
+      const suffix = action
+        ? `${action} ${terminalLine(input?.[action] ?? '')}`
+        : input?.background
+          ? 'background'
+          : '';
+      return new Text(suffix ? `${title} ${theme.fg('muted', suffix)}` : title, 0, 0);
     },
     renderResult(result, { isPartial }, theme) {
       const snapshot = result.details as WorkflowSnapshot | undefined;
@@ -372,12 +454,58 @@ function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
   ) {
     throw new Error('workflow requires `tokenBudget` to be a positive integer');
   }
-  if (value.script === undefined && value.resume === undefined)
+  if (value.background !== undefined && typeof value.background !== 'boolean') {
+    throw new Error('workflow requires `background` to be a boolean');
+  }
+  const queries = ['status', 'result', 'cancel'].filter((key) => value[key] !== undefined);
+  for (const key of queries) {
+    if (typeof value[key] !== 'string' || !(value[key] as string).trim()) {
+      throw new Error(`workflow requires \`${key}\` to be a non-empty run id string`);
+    }
+  }
+  if (
+    queries.length > 1 ||
+    (queries.length === 1 &&
+      ['script', 'resume', 'args', 'tokenBudget', 'background'].some(
+        (key) => value[key] !== undefined
+      ))
+  ) {
+    throw new Error('workflow status, result, and cancel must be used alone with a run id');
+  }
+  if (value.script === undefined && value.resume === undefined && queries.length === 0)
     throw new Error('workflow requires `script`, or `resume` with an earlier run id');
   return {
     ...value,
     ...(typeof value.script === 'string' ? { script: normalizeWorkflowScript(value.script) } : {})
   } as WorkflowToolInput;
+}
+
+function workflowStatusResult(
+  snapshot: WorkflowSnapshot,
+  cancelled?: 'aborted' | 'not_live',
+  error?: string
+) {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: [
+          cancelled === 'aborted' ? 'Cancellation requested. Completed work is kept.' : '',
+          `Workflow ${snapshot.name}: ${snapshot.status}. Run id: ${snapshot.runId}.`,
+          `${snapshot.doneCount}/${snapshot.agentCount} agents done.`,
+          error ?? '',
+          snapshot.status === 'completed'
+            ? `Retrieve the result with { "result": "${snapshot.runId}" }.`
+            : snapshot.status === 'running'
+              ? 'The run is still finishing. Continue other work rather than polling.'
+              : `To continue, call workflow with { "resume": "${snapshot.runId}" }.`
+        ]
+          .filter(Boolean)
+          .join('\n')
+      }
+    ],
+    details: compactSnapshot(snapshot)
+  };
 }
 
 function normalizeWorkflowScript(script: string): string {

@@ -30,7 +30,7 @@ export interface WorkflowRunReport {
   status: WorkflowRunDisplayStatus;
   attempts: WorkflowAttemptReport[];
   usage: Usage;
-  /** Held open by an active workflow tool call in this process. */
+  /** Held open by a workflow caller in this process, including background execution. */
   active: boolean;
 }
 

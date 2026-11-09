@@ -44,8 +44,16 @@ function setup(run: WorkflowRunIndex) {
   const notify = vi.fn<ExtensionContext['ui']['notify']>();
   return {
     notify,
-    start(hasUI = true) {
-      start({ type: 'session_start' }, { cwd: run.cwd, hasUI, ui: { notify } });
+    async start(hasUI = true) {
+      await start(
+        { type: 'session_start' },
+        {
+          cwd: run.cwd,
+          hasUI,
+          ui: { notify },
+          sessionManager: { getSessionId: () => 'test', getEntries: () => [] }
+        }
+      );
     }
   };
 }
@@ -66,11 +74,11 @@ const interrupted: WorkflowRunIndex = {
 test.each([
   '\u001b[31maudit\u001b[0m\u0007\nnext\tphase',
   'audit\u009d0;title\u009c\u202e\nnext\tphase'
-])('startup notification sanitizes the interrupted workflow name: %j', (name) => {
+])('startup notification sanitizes the interrupted workflow name: %j', async (name) => {
   const run = { ...interrupted, name };
   const before = structuredClone(run);
   const mocked = setup(run);
-  mocked.start();
+  await mocked.start();
 
   assert.equal(mocked.notify.mock.calls.length, 1);
   const [message, tone] = mocked.notify.mock.calls[0];
@@ -83,9 +91,9 @@ test.each([
   assert.deepEqual(run, before);
 });
 
-test('startup without UI does not emit an interrupted workflow notification', () => {
+test('startup without UI does not emit an interrupted workflow notification', async () => {
   const mocked = setup(interrupted);
-  mocked.start(false);
+  await mocked.start(false);
   assert.equal(mocked.notify.mock.calls.length, 0);
 });
 

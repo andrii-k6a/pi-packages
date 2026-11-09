@@ -47,7 +47,32 @@ The model will write a workflow script and call the `workflow` tool. Live progre
 
 Rows also show duration, tokens, the model/profile in use, and what each running subagent is doing right now (for example `bash: npm test`, `thinking`, or `retrying (attempt 2): 429`). Extensions that call other tools show the nested work, such as `codemode → bash: 3 passed`, rather than just the orchestrator. Unresolved compaction failures appear as warnings, including after the agent finishes. The footer shows the run id, attempt, elapsed time, and spend.
 
-Press `Esc` to cancel a running workflow. Active subagents are aborted bottom-up and surfaced as skipped, **completed results are kept**, and the error names the run id so the model (or you) can resume it. To follow, steer, or stop a single agent instead, use [`/workflows`](#workflows).
+Press `Esc` to cancel a foreground workflow. Active subagents are aborted bottom-up and surfaced as skipped, **completed results are kept**, and the error names the run id so the model (or you) can resume it. To follow, steer, or stop a single agent instead, use [`/workflows`](#workflows).
+
+### Background execution
+
+Foreground execution remains the default. In TUI or RPC mode, add `background: true` to a start or resume call to return a run id without waiting:
+
+```json
+{
+  "background": true,
+  "script": "export const meta = { name: 'inspect', description: 'Inspect the project' }; return await agent('Inspect the repository structure', { label: 'inventory' })"
+}
+```
+
+The main agent can continue other work while a compact progress widget tracks the run. When the run finishes, a follow-up tells the main agent to retrieve its result through `workflow`. The follow-up waits for the main agent's current work to finish. If `Esc` aborts that work, delivery stays pending until the next successful main-agent turn. Result retrieval returns the stored result and native usage through the [existing receipt protocol](#resuming), without running agents again.
+
+The main agent can also call these queries, each on its own:
+
+```json
+{ "status": "20261012-185628-inspect_project-3f9a" }
+{ "result": "20261012-185628-inspect_project-3f9a" }
+{ "cancel": "20261012-185628-inspect_project-3f9a" }
+```
+
+`status` inspects the run. `result` retrieves a completed result or reports the current state without waiting or retrying. `cancel` aborts active work and keeps completed agents for a later resume. Avoid polling. After launch, `Esc` affects the main agent, not the background run. Use `cancel` or `/workflows` to stop that run.
+
+Execution stays in the Pi process. Quit, `/reload`, session switches, and forks interrupt active runs safely. Resume them explicitly, adding `background: true` to continue in the background. Pending result notifications are recovered when the originating session reopens, not in a fork or replacement session. A notification can repeat after recovery until the result has been retrieved and persisted. In-memory sessions have no notification recovery after exit. Print and JSON modes require foreground execution.
 
 ## Durable runs
 
@@ -79,7 +104,7 @@ Call the tool with `resume`:
 
 Interrupted runs are announced when a session starts in the same directory. Spend of an attempt that failed or was aborted is not lost: the attempt that completes the run returns it to the session.
 
-Usage delivery is crash-safe rather than assumed. When a run completes, the unreported spend is committed as a *pending receipt* and the receipt id is included in the tool result's `details.usageReceipt`. The receipt is acknowledged only after Pi has persisted that tool result in the parent session file. The run stays locked until then, so a competing resume cannot offer the same spend twice. If the process dies before the result is persisted, the next resume offers the spend again; if it dies after, the next resume finds the receipt in the parent session's raw history and acknowledges it. If the parent session file is missing or unreadable, resume fails closed instead of guessing. In-memory Pi sessions have no file to check, so their usage is acknowledged immediately. Library callers read `unreportedUsage`/`usageReceipt` from the outcome and call `acknowledgeUsage(receiptId)` only after durably recording both.
+Usage delivery is crash-safe rather than assumed. When a completed result is returned, the unreported spend is committed as a *pending receipt* and the receipt id is included in the tool result's `details.usageReceipt`. The receipt is acknowledged only after Pi has persisted that tool result in the parent session file. The run stays locked until then, so a competing resume cannot offer the same spend twice. If the process dies before the result is persisted, the next resume offers the spend again; if it dies after, the next resume finds the receipt in the parent session's raw history and acknowledges it. If the parent session file is missing or unreadable, resume fails closed instead of guessing. In-memory Pi sessions have no file to check, so their usage is acknowledged immediately. Library callers read `unreportedUsage`/`usageReceipt` from the outcome and call `acknowledgeUsage(receiptId)` only after durably recording both.
 
 A tool call cut off by a crash follows Pi Durable's replay rules: `read` and `structured_output` are idempotent and simply run again, while `bash`, `write`, and `edit` are **not** replayed (they may have partly run), so the model receives an `interrupted` error with the output committed so far and decides what to do next.
 
@@ -356,7 +381,7 @@ user prompt
 - **Model access.** Subagents use Pi's own `ModelRuntime` (Pi Durable accepts it as pi-ai `Models`), so they share the session's providers, auth, and request transforms. A subagent runs on the session model and thinking level unless a profile routes it elsewhere; the route is recorded per agent.
 - **Prompts.** Subagents get a Pi-style system prompt (rules, `AGENTS.md`/project context, skills, working directory) captured once when the run is created, so a resumed run keeps the same prompt and warm provider caches. Provider failures retry durably (3 retries with backoff) and long contexts compact automatically.
 - **Tools.** Subagents use Pi Durable's `read`, `write`, `edit`, and `bash` (an interrupted `read` simply runs again), plus `structured_output` when a schema is requested, plus any [approved MCP tools and extensions](#tools-and-extensions-for-subagents). The `workflow` tool is not available to them, so they cannot start nested workflows.
-- **Usage.** Subagent token usage and cost are summed from each conversation's durable usage ledger (failed and aborted attempts included) and returned to the parent session when the run completes, with a receipt that makes delivery crash-safe (see [Resuming](#resuming)). `budget.spent()` counts reported tokens, falling back to an estimate for successful agents that report none; reused results count toward `budget.spent()` in the script, but not toward the new attempt's reported spend.
+- **Usage.** Subagent token usage and cost are summed from each conversation's durable usage ledger (failed and aborted attempts included) and returned to the parent session with the completed result and a crash-safe receipt (see [Resuming](#resuming)). `budget.spent()` counts reported tokens, falling back to an estimate for successful agents that report none; reused results count toward `budget.spent()` in the script, but not toward the new attempt's reported spend.
 
 ### Differences from the previous in-memory backend
 
@@ -374,6 +399,8 @@ import type { WorkflowRunBinding, WorkflowExtensionProvider } from '@andrii-k6a/
 ```
 
 `WorkflowHost.start(options, binding)` and `resume(runId, options, binding)` accept `tokenBudget` next to `script`, `args`, and `concurrency`; the host option `maxAgents` (default `DEFAULT_MAX_AGENTS`, 500) caps `agent()` calls per attempt. Both return a handle with `wait()`, `watch()`, `abort()`, `acknowledgeUsage()`, and `close()`. A binding supplies pi-ai `Models`, the default `route`, approved-profile resolution, and captured prompt context. Always close handles (or `host.closeAll()` on shutdown); closing releases resources without aborting durable work. If `wait()` returns a usage receipt, durably record it with the usage before acknowledging it. See [Resuming](#resuming) for crash-safe delivery.
+
+`WorkflowHost.result(runId, binding)` opens only a completed result and returns the same handle without scheduling work. It rejects unfinished, failed, or aborted runs. Receipt acknowledgement and handle cleanup follow the same rules as `start()` and `resume()`.
 
 `runWorkflow()` is the lower-level interpreter with an injected executor; it does not create durable storage on its own. The separate `./workflow` entry supplies only ambient editor globals. Deep `src/`/`dist/` imports are internal and not exported. In a local checkout, run `npm run build --workspace @andrii-k6a/pi-dynamic-workflows` before importing the library; `npm pack` builds it automatically. Loading the Pi extension itself still uses its TypeScript source entry, with no build required.
 
@@ -416,7 +443,7 @@ Internal module responsibilities (these are not public import paths):
 | `src/durable/` | `host.ts` drives runs; `docs.ts` owns durable records; `store.ts` owns directories and leases; `open-run.ts` owns open resources; `billing.ts`/`usage-delivery.ts` reconcile receipts; `report.ts` maps records to snapshots/transcripts; `providers.ts`/`extension-admission.ts` define and validate host extensions; `subagent.ts` supplies prompt/output extensions. |
 | `src/durable/tasks/` | `factory.ts` wires `run.ts` and `agent.ts` to a per-run schema cache. `contracts.ts` owns replay inputs/checkpoints/services; `outcome.ts` formats authoritative task outcomes. |
 | `src/durable/mcp/` | `config.ts` reads allowlists and Pi's MCP settings; `provider.ts` owns shared connections and approved durable tools. |
-| `src/pi/` | `workflow-tool.ts` adapts Pi calls to the host; `runs-command.ts` implements `/workflows`; `display.ts` renders plain snapshots and forwards a progress update only when its picture changed; `limits.ts` reads `PI_WORKFLOW_MAX_AGENTS`. |
+| `src/pi/` | `workflow-tool.ts` adapts Pi calls to the host; `background.ts` owns session-scoped execution and result-ready recovery; `runs-command.ts` implements `/workflows`; `display.ts` renders plain snapshots and forwards a progress update only when its picture changed; `limits.ts` reads `PI_WORKFLOW_MAX_AGENTS`. |
 | `src/pi/profiles/` | `manager.ts` orchestrates `/workflow-profiles`; `list.ts` and `wizard.ts` own interaction state; `choices.ts` filters models and thinking levels for the current Pi session. |
 | `src/shared/` | Neutral `terminal-text.ts`, `json-values.ts`, and `usage.ts` helpers, without dependencies on workflow, durable, or UI modules. |
 

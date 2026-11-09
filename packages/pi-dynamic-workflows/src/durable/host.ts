@@ -203,8 +203,8 @@ export interface WorkflowAttemptHandle {
 
 /**
  * Process-side owner of durable workflow runs. Each run is a separate Pi Durable Session over
- * SQLite, held open (and locked) only while a workflow tool call drives it or the inspector reads
- * it. Closing never aborts: unfinished work stays committed and resumes on the next open.
+ * SQLite, held open (and locked) while a caller drives it or the inspector reads it. Closing never
+ * aborts: unfinished work stays committed and resumes on the next open.
  */
 export class WorkflowHost {
   readonly runsRoot: string;
@@ -421,7 +421,35 @@ export class WorkflowHost {
     }
   }
 
-  /** Abort a run's live attempt, whether a tool call in this process drives it or it was interrupted. */
+  /** Retrieve a completed result under its lease. Never schedules or retries workflow work. */
+  async result(runId: string, binding: WorkflowRunBinding): Promise<WorkflowAttemptHandle> {
+    assertValidRunId(runId);
+    if (!runExists(this.runsRoot, runId)) throw new Error(`unknown workflow run ${runId}`);
+    const open = await this.#openRun(runId, binding);
+    try {
+      const run = await readRun(open.harness);
+      const latestId = run.attempts.at(-1);
+      const latest =
+        latestId === undefined
+          ? undefined
+          : await open.harness.getTask(latestId as TaskId<WorkflowRunTaskResult>, context);
+      if (
+        latestId === undefined ||
+        latest?.state.status !== 'terminal' ||
+        latest.state.outcome.status !== 'completed'
+      ) {
+        throw new Error(
+          `workflow run ${runId} has no completed result; inspect its status or resume explicitly`
+        );
+      }
+      return this.#handle(open, latestId, (latest.input as WorkflowRunInput).number, 'completed');
+    } catch (error) {
+      await open.close();
+      throw error;
+    }
+  }
+
+  /** Abort a run's live attempt, whether a caller in this process drives it or it was interrupted. */
   async abort(runId: string): Promise<'aborted' | 'not_live'> {
     assertValidRunId(runId);
     const active = this.#open.get(runId);

@@ -257,6 +257,7 @@ test('createWorkflowTool keeps essential guidance while avoiding repeated schema
   assert.ok((scriptDescription.description ?? '').length < 200);
   assert.ok(scriptDescription.description?.includes("meta = { name: '...', description: '...' }"));
   assert.match(guidance, /only when the user explicitly asks/);
+  assert.match(guidance, /Use background: true if other work can proceed; else wait for it/);
   assert.match(guidance, /First statement: `export const meta =/);
   assert.match(guidance, /Date\.now\(\).*Math\.random\(\)/);
   assert.ok(

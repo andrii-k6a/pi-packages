@@ -2,6 +2,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { WorkflowHost } from './durable/host.js';
 import { loadWorkflowMcpAllowlist } from './durable/mcp/config.js';
 import { createMcpProvider } from './durable/mcp/provider.js';
+import { WorkflowBackgroundRuns } from './pi/background.js';
 import { loadWorkflowMaxAgents } from './pi/limits.js';
 import { openWorkflowProfileManager } from './pi/profiles/manager.js';
 import { openWorkflowRuns } from './pi/runs-command.js';
@@ -21,7 +22,12 @@ export default function extension(pi: ExtensionAPI) {
       : [],
     ...(maxAgents === undefined ? {} : { maxAgents })
   });
-  const workflowTool = createWorkflowTool({ profiles: loadWorkflowProfiles(), host });
+  const backgroundRuns = new WorkflowBackgroundRuns(pi, host);
+  const workflowTool = createWorkflowTool({
+    profiles: loadWorkflowProfiles(),
+    host,
+    backgroundRuns
+  });
   pi.registerTool(workflowTool);
   pi.registerCommand('workflow-profiles', {
     description:
@@ -33,11 +39,12 @@ export default function extension(pi: ExtensionAPI) {
     handler: async (args, ctx) => openWorkflowRuns(pi, ctx, host, args)
   });
 
-  pi.on('session_start', (_event, ctx) => {
+  pi.on('session_start', async (_event, ctx) => {
     const active = pi.getActiveTools();
     if (!active.includes(workflowTool.name)) {
       pi.setActiveTools([...active, workflowTool.name]);
     }
+    await backgroundRuns.recover(ctx);
     if (!ctx.hasUI) return;
     const interrupted = host
       .list()
@@ -58,9 +65,33 @@ export default function extension(pi: ExtensionAPI) {
     await host.settleDeliveries(ctx.sessionManager.getSessionFile());
   });
 
+  pi.on('agent_before_settle', (event, ctx) => {
+    if (event.outcome !== 'completed') return;
+    const notifications = backgroundRuns.notificationEntries(ctx);
+    if (notifications.length > 0) {
+      return { entries: [...event.entries, ...notifications], continue: true };
+    }
+  });
+
+  pi.on('agent_settled', (event, ctx) => {
+    backgroundRuns.settleNotifications(ctx);
+    if (event.aborted) backgroundRuns.cancelNotificationFlush();
+    else backgroundRuns.sendNotifications(ctx);
+  });
+
+  pi.on('session_compact', (event, ctx) => {
+    if (event.reason === 'manual') backgroundRuns.scheduleNotificationFlush(ctx);
+  });
+
+  pi.on('session_compact_failed', (event, ctx) => {
+    if (event.reason !== 'manual') return;
+    if (event.aborted) backgroundRuns.cancelNotificationFlush();
+    else backgroundRuns.scheduleNotificationFlush(ctx);
+  });
+
   // Quit, reload, and session switches close runs without aborting them: unfinished work stays
   // committed in each run's Session and continues on `resume`.
-  pi.on('session_shutdown', async () => {
-    await host.closeAll();
+  pi.on('session_shutdown', async (_event, ctx) => {
+    await backgroundRuns.close(ctx);
   });
 }
