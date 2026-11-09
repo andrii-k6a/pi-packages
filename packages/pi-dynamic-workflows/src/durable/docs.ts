@@ -2,6 +2,7 @@ import type { JsonRepresentation, JsonValue } from '@earendil-works/chord';
 import type { ModelThinkingLevel, Usage } from '@earendil-works/pi-ai';
 import { defineDoc, defineDocFamily } from '@earendil-works/pi-durable';
 import type { WorkflowAgentStatus, WorkflowAttemptStatus } from '../workflow/contracts.js';
+import type { WorkflowWorktree } from './worktree.js';
 
 export type { WorkflowAttemptStatus } from '../workflow/contracts.js';
 
@@ -84,6 +85,8 @@ export type WorkflowAgentRow = {
   taskId?: number;
   /** The subagent's own durable conversation (transcript, live state, usage). */
   conversationId?: number;
+  /** Retained checkout identity, including a planned checkout if creation failed. */
+  worktree?: WorkflowWorktree;
   /** Attempt number whose completed result this row reuses. */
   reusedFrom?: number;
   startedAt?: number;

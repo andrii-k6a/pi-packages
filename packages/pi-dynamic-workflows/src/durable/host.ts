@@ -80,6 +80,8 @@ import { canonicalJson } from './subagent.js';
 import { SubagentExtension } from './tasks/agent.js';
 import {
   AGENT_TASK_NAME,
+  type AgentCheckpoint,
+  type RunCheckpoint,
   type WorkflowAgentInput,
   type WorkflowAgentTaskResult,
   type WorkflowRunInput,
@@ -88,6 +90,7 @@ import {
 import { createWorkflowTasks } from './tasks/factory.js';
 import { outcomeMessage as outcomeError } from './tasks/outcome.js';
 import { acknowledgeUsage, offerUsage, reconcileUsage } from './usage-delivery.js';
+import { validateWorktree } from './worktree.js';
 
 const context = BACKGROUND_CONTEXT;
 
@@ -327,8 +330,8 @@ export class WorkflowHost {
   }
 
   /**
-   * Continue a run. A live attempt (interrupted by a crash, quit, or reload) continues in place
-   * from its durable checkpoints. Otherwise a new attempt starts, with the given script or the
+   * Continue a run. A compatible live attempt continues from its checkpoints after worktree validation.
+   * Otherwise a new attempt starts, with the given script or the
    * previous one, and reuses every completed agent call that is identical. A completed run with
    * no new script returns its stored result.
    */
@@ -371,13 +374,53 @@ export class WorkflowHost {
       ) {
         return this.#handle(open, latestId, previous.number, 'completed');
       }
+      let canContinue = live && sameWork && !budgetChanged;
+      if (canContinue) {
+        const checkpoint = latest.state.checkpoint as RunCheckpoint | undefined;
+        const ids = new Set([
+          ...Object.values(checkpoint?.agents ?? {}),
+          ...Object.values(checkpoint?.reused ?? {})
+        ]);
+        const agents = await Promise.all(
+          [...ids].map((id) => harness.getTask(id as TaskId<WorkflowAgentTaskResult>, context))
+        );
+        // Legacy hints have different call keys but still own runnable shared-directory agents.
+        canContinue = !agents.some((agent) => {
+          const input = agent?.input as WorkflowAgentInput | undefined;
+          return (
+            input?.isolation === undefined &&
+            input?.instructions?.split('\n').includes('Requested isolation: worktree')
+          );
+        });
+        if (canContinue) {
+          // Child generation and tool tasks resume independently of their owning agent task.
+          for (const agent of agents) {
+            if (!agent || agent.state.status === 'terminal' || agent.abortRequested) continue;
+            const checkpoint = agent.state.checkpoint as AgentCheckpoint | undefined;
+            const worktree =
+              checkpoint?.worktree ??
+              (agent.state.status === 'completing'
+                ? agent.state.outcome.result?.worktree
+                : undefined);
+            if (!worktree || checkpoint?.phase === 'start') continue;
+            try {
+              await validateWorktree(worktree);
+            } catch (error) {
+              throw new Error(
+                `Cannot resume workflow ${runId}: Git worktree validation failed: ${error instanceof Error ? error.message : String(error)}. Restore the saved worktree or abort the run.`,
+                { cause: error }
+              );
+            }
+          }
+        }
+      }
       await this.#attachExtensions(open, binding, previous.cwd);
-      if (live && sameWork && !budgetChanged) {
+      if (canContinue) {
         harness.resume();
         return this.#handle(open, latestId, previous.number, 'continued');
       }
       if (live) {
-        // A different script replaces the live attempt; its completed agents stay reusable.
+        // Drain old ownership before admitting replacement calls, including legacy isolation hints.
         await harness.abortTask(latestId as TaskId, context);
         harness.resume();
         await harness.waitForTask(latestId as TaskId, context);

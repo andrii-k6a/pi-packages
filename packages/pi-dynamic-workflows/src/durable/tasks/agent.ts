@@ -25,6 +25,7 @@ import {
   WorkflowPauseDoc
 } from '../docs.js';
 import { createSubagentExtension, STRUCTURED_OUTPUT_NUDGE } from '../subagent.js';
+import { ensureWorktree, planWorktree, validateWorktree } from '../worktree.js';
 import {
   AGENT_TASK_NAME,
   type AgentCheckpoint,
@@ -33,7 +34,7 @@ import {
   type WorkflowAgentTaskResult,
   type WorkflowTaskServices
 } from './contracts.js';
-import { outcomeMessage } from './outcome.js';
+import { errorText, outcomeMessage } from './outcome.js';
 
 /** How often a paused agent checks whether the user has resumed it. */
 const PAUSE_POLL_MS = 250;
@@ -57,6 +58,40 @@ export function createAgentTask(
       // aborts the subagent and the ownership index finds it again after a restart.
       start: async (task, runtime, context) => {
         const input = task.input;
+        const { worktree } = task.state.checkpoint;
+        if (input.isolation && !worktree) {
+          let planned: Awaited<ReturnType<typeof planWorktree>>;
+          try {
+            planned = await planWorktree(input.cwd, input.label);
+          } catch (error) {
+            await failWorktreeAgent(runtime, task, context, error);
+            return;
+          }
+          await runtime.commit(async (tx) => {
+            const row = await agentRow(tx, input, runtime.now());
+            if (row) row.worktree = planned;
+            return { status: 'running', checkpoint: { phase: 'start', worktree: planned } };
+          }, context);
+          return;
+        }
+        if (worktree) {
+          try {
+            await ensureWorktree(worktree);
+          } catch (error) {
+            await failWorktreeAgent(runtime, task, context, error);
+            return;
+          }
+        }
+        const instructions = [
+          input.instructions,
+          worktree
+            ? `You are editing an isolated Git worktree on branch ${worktree.branch}, based on commit ${worktree.baseCommit}. ` +
+              'Uncommitted parent changes are not included. Use relative paths within your <cwd>, not the original paths in captured project instructions. ' +
+              'The checkout and branch are retained. Do not merge into the parent checkout or delete this worktree.'
+            : undefined
+        ]
+          .filter(Boolean)
+          .join('\n\n');
         const output = input.schema === undefined ? undefined : outputExtension(input.schema);
         const provided = services.extensions(input.extensions ?? []);
         await runtime.commit(async (tx) => {
@@ -84,8 +119,8 @@ export function createAgentTask(
                 ...(input.extensions ?? []).map((name) => ({ name })),
                 ...(output ? [output] : [])
               ],
-              cwd: input.cwd,
-              ...(input.instructions ? { instructions: input.instructions } : {})
+              cwd: worktree?.cwd ?? input.cwd,
+              ...(instructions ? { instructions } : {})
             });
           }
           if (provided.missing.length > 0 && existing === undefined) {
@@ -100,14 +135,30 @@ export function createAgentTask(
             row.conversationId = conversationId;
             row.startedAt ??= runtime.now();
           }
-          return { status: 'running', checkpoint: { phase: 'run', conversationId, nudges: 0 } };
+          return {
+            status: 'running',
+            checkpoint: {
+              phase: 'run',
+              conversationId,
+              nudges: 0,
+              ...(worktree ? { worktree } : {})
+            }
+          };
         }, context);
       },
       // Effect: submit the prompt (idempotent by request ID) and wait for the answer. A restart
       // re-enters here and reattaches to the same submission; generation resumes on its own.
       run: async (task, runtime, context) => {
         const input = task.input;
-        const { conversationId, nudges, turn = 0, message } = task.state.checkpoint;
+        const { conversationId, nudges, turn = 0, message, worktree } = task.state.checkpoint;
+        if (worktree) {
+          try {
+            await validateWorktree(worktree);
+          } catch (error) {
+            await failWorktreeAgent(runtime, task, context, error);
+            return;
+          }
+        }
         const id = conversationId as ConversationId;
         const handle = await runtime.conversation(id, context);
         if (!handle) {
@@ -141,7 +192,13 @@ export function createAgentTask(
             await tx.appendEntry(id, { kind: PAUSED_ENTRY, data: {} });
             return {
               status: 'running',
-              checkpoint: { phase: 'paused', conversationId, nudges, turn }
+              checkpoint: {
+                phase: 'paused',
+                conversationId,
+                nudges,
+                turn,
+                ...(worktree ? { worktree } : {})
+              }
             };
           }, context);
           return;
@@ -170,6 +227,7 @@ export function createAgentTask(
                     phase: 'run',
                     conversationId,
                     nudges: nudges + 1,
+                    ...(worktree ? { worktree } : {}),
                     ...(turn ? { turn } : {})
                   }
                 }),
@@ -211,7 +269,7 @@ export function createAgentTask(
       },
       paused: async (task, runtime, context) => {
         const input = task.input;
-        const { conversationId, nudges, turn } = task.state.checkpoint;
+        const { conversationId, nudges, turn, worktree } = task.state.checkpoint;
         const id = conversationId as ConversationId;
         let state = await runtime.snapshot(WorkflowPauseDoc, id, context);
         while (state?.paused) {
@@ -239,7 +297,14 @@ export function createAgentTask(
           await tx.appendEntry(id, { kind: RESUMED_ENTRY, data: {} });
           return {
             status: 'running',
-            checkpoint: { phase: 'run', conversationId, nudges, turn: turn + 1, message }
+            checkpoint: {
+              phase: 'run',
+              conversationId,
+              nudges,
+              turn: turn + 1,
+              message,
+              ...(worktree ? { worktree } : {})
+            }
           };
         }, context);
       }
@@ -273,13 +338,40 @@ type AgentRuntime = TaskRuntime<
   object
 >;
 
+type AgentTaskState = { input: WorkflowAgentInput; state: { checkpoint: AgentCheckpoint } };
+
+async function failWorktreeAgent(
+  runtime: AgentRuntime,
+  task: AgentTaskState,
+  context: Context,
+  error: unknown
+): Promise<void> {
+  if (runtime.signal.aborted) throw error;
+  const checkpoint = task.state.checkpoint;
+  const usage =
+    checkpoint.phase === 'start'
+      ? (emptyUsage() as StoredUsage)
+      : (sumUsageState(
+          await runtime.snapshot(UsageDoc, checkpoint.conversationId as ConversationId, context)
+        ) as StoredUsage);
+  await finishAgent(runtime, task, context, {
+    status: 'failed',
+    error: { message: `Git worktree isolation failed: ${errorText(error)}` },
+    result: { value: null, usage }
+  });
+}
+
 async function finishAgent(
   runtime: AgentRuntime,
-  task: { input: WorkflowAgentInput },
+  task: AgentTaskState,
   context: Context,
   outcome: TaskOutcome<WorkflowAgentTaskResult>
 ): Promise<void> {
   const endedAt = runtime.now();
+  const { worktree } = task.state.checkpoint;
+  if (worktree && outcome.result) {
+    outcome = { ...outcome, result: { ...outcome.result, worktree } };
+  }
   await runtime.commit(async (tx) => {
     const row = await agentRow(tx, task.input, endedAt);
     if (row) {

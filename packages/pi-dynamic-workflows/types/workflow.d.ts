@@ -39,7 +39,7 @@ declare global {
     schema?: TSchema;
     /** Optional approved profile name for this subagent. */
     profile?: string;
-    /** Non-enforced prompt hint. Does not create a worktree or change filesystem access. */
+    /** Use a retained Git worktree based on HEAD. Not a filesystem security boundary. */
     isolation?: 'worktree';
     /** Requested subagent role/type. */
     agentType?: string;
@@ -112,7 +112,7 @@ declare global {
   /** Optional JSON object passed to the workflow tool. Narrow with a local type assertion when needed. */
   const args: unknown;
 
-  /** Current working directory for the workflow/subagents. */
+  /** Run working directory. Worktree-isolated agents use their own checkout directory. */
   const cwd: string;
 
   /** Deterministic process shim exposing only cwd(). */

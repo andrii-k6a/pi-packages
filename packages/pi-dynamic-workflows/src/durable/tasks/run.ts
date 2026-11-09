@@ -112,6 +112,7 @@ export function createRunTask(
                   status: 'done',
                   reusedFrom: reusedResult.attemptNumber,
                   conversationId: reusedResult.conversationId,
+                  ...(reusedResult.worktree ? { worktree: reusedResult.worktree } : {}),
                   usage: reusedResult.usage,
                   preview: preview(reusedResult.value, 160),
                   startedAt: runtime.now(),
@@ -147,6 +148,7 @@ export function createRunTask(
                   ...(schema === undefined ? {} : { schema }),
                   ...(route ? { route } : {}),
                   cwd: input.cwd,
+                  ...(options.isolation ? { isolation: options.isolation } : {}),
                   ...(input.extensions?.length ? { extensions: input.extensions } : {})
                 },
                 { ownership: { kind: 'task', taskId: task.id } }
@@ -284,6 +286,7 @@ type ReusableResult = {
   usage: StoredUsage;
   conversationId?: number;
   attemptNumber?: number;
+  worktree?: WorkflowAgentTaskResult['worktree'];
 };
 
 type RunRuntime = TaskRuntime<WorkflowRunInput, RunCheckpoint, WorkflowRunTaskResult, object>;
@@ -317,7 +320,10 @@ function agentRowDraft(
  */
 export function agentBaseKey(
   prompt: string,
-  options: Pick<WorkflowAgentRunOptions, 'requestedLabel' | 'instructions' | 'schema'>,
+  options: Pick<
+    WorkflowAgentRunOptions,
+    'requestedLabel' | 'instructions' | 'schema' | 'isolation'
+  >,
   route: WorkflowRoute | undefined
 ): string {
   return createHash('sha256')
@@ -327,6 +333,7 @@ export function agentBaseKey(
         label: options.requestedLabel ?? null,
         instructions: options.instructions ?? null,
         schema: options.schema ?? null,
+        ...(options.isolation ? { isolation: options.isolation } : {}),
         route: route ?? null
       })
     )
@@ -428,6 +435,7 @@ function reusableFromRecord(
     taskId: record.id,
     value: outcome.result.value,
     usage: outcome.result.usage,
+    ...(outcome.result.worktree ? { worktree: outcome.result.worktree } : {}),
     ...(outcome.result.conversationId === undefined
       ? {}
       : { conversationId: outcome.result.conversationId }),

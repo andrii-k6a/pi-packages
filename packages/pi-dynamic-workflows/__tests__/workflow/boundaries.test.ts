@@ -65,7 +65,7 @@ test('VM built-in mutations stay local and deterministic Date helpers still work
 test('unsupported isolation modes reject before invoking the executor', async () => {
   await assert.rejects(
     runWorkflow(`${meta}return await agent('p', { isolation: 'container' })`, { agent }),
-    /non-enforced prompt hint/
+    /agent isolation must be "worktree"/
   );
 });
 

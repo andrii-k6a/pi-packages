@@ -837,7 +837,7 @@ test('x cancels a paused agent, which is not busy', async () => {
   expect(host.cancelAgent).toHaveBeenCalledWith('run-1', 7);
 });
 
-test('the run view marks a paused agent', () => {
+test('the run view marks a paused agent and shows its retained worktree identity', () => {
   const lines = renderRunDetailLines(
     {
       ...report,
@@ -859,7 +859,15 @@ test('the run view marks a paused agent', () => {
               status: 'running',
               prompt: 'p',
               conversationId: 7,
-              paused: true
+              paused: true,
+              worktree: {
+                repoRoot: '/repo',
+                commonDir: '/repo/.git',
+                path: '/repo/.git/pi-workflow-worktrees/worker',
+                cwd: '/repo/.git/pi-workflow-worktrees/worker/src',
+                branch: 'pi/workflow/worker',
+                baseCommit: 'abc'
+              }
             }
           }
         }
@@ -870,4 +878,7 @@ test('the run view marks a paused agent', () => {
     10
   );
   assert.ok(lines.some((line) => /#1 ⏸ worker/.test(line)));
+  assert.ok(lines.includes('   branch pi/workflow/worker'));
+  assert.ok(lines.includes('   worktree /repo/.git/pi-workflow-worktrees/worker'));
+  assert.ok(lines.includes('   agent cwd /repo/.git/pi-workflow-worktrees/worker/src'));
 });

@@ -1,6 +1,7 @@
 import type { JsonValue } from '@earendil-works/chord';
 import type { Extension } from '@earendil-works/pi-durable';
 import type { StoredUsage, WorkflowRoute } from '../docs.js';
+import type { WorkflowWorktree } from '../worktree.js';
 
 export const RUN_TASK_NAME = 'workflow.run';
 export const AGENT_TASK_NAME = 'workflow.agent';
@@ -58,11 +59,12 @@ export type WorkflowAgentInput = {
   schema?: JsonValue;
   route?: WorkflowRoute;
   cwd: string;
+  isolation?: 'worktree';
   /** Host-provided extensions the subagent selects, by name (see `WorkflowRunInput.extensions`). */
   extensions?: string[];
 };
 
-export type AgentCheckpoint =
+export type AgentCheckpoint = { worktree?: WorkflowWorktree } & (
   | { phase: 'start' }
   | {
       phase: 'run';
@@ -73,12 +75,14 @@ export type AgentCheckpoint =
       /** Set when the agent has just resumed: the message this invocation sends. */
       message?: string;
     }
-  | { phase: 'paused'; conversationId: number; nudges: number; turn: number };
+  | { phase: 'paused'; conversationId: number; nudges: number; turn: number }
+);
 
 export type WorkflowAgentTaskResult = {
   value: JsonValue;
   usage: StoredUsage;
   conversationId?: number;
+  worktree?: WorkflowWorktree;
 };
 
 /** Host capabilities a run's tasks use; bound by the process that holds the run open. */

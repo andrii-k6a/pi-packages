@@ -267,6 +267,16 @@ test('createWorkflowTool keeps essential guidance while avoiding repeated schema
   assert.match(guidance, /check for nulls/i);
   assert.match(guidance, /plain JSON Schema via opts\.schema/);
   assert.match(guidance, /Subagents cannot start workflows themselves/);
+  assert.match(guidance, /Use isolation: "worktree" for independent editing agents/);
+  assert.match(guidance, /retains a HEAD checkout without parent edits/);
+  assert.match(guidance, /Give self-contained tasks and relative paths/);
+  assert.match(guidance, /Ask isolated agents for branch, checkout path, and verification results/);
+  assert.match(guidance, /Later agents do not automatically see their edits/);
+  assert.match(guidance, /Git errors fail/);
+  assert.match(guidance, /Not a sandbox/);
+  assert.match(guidance, /Inspect via \/workflows/);
+  assert.match(guidance, /Merge\/remove manually/);
+  assert.doesNotMatch(guidance, /prompt hint/);
 });
 
 test('createWorkflowTool is model-only so codemode scripts cannot call it', () => {

@@ -838,6 +838,13 @@ function runDetailSections(
       details.push(
         `   model ${sanitize(current.model)}${current.thinkingLevel ? ` · thinking ${current.thinkingLevel}` : ''}`
       );
+    if (current.worktree) {
+      details.push(
+        `   branch ${sanitize(current.worktree.branch)}`,
+        `   worktree ${sanitize(current.worktree.path)}`,
+        `   agent cwd ${sanitize(current.worktree.cwd)}`
+      );
+    }
     details.push(`   prompt ${sanitize(oneLine(current.prompt)).slice(0, 400)}`);
     if (current.preview) details.push(`   result ${sanitize(oneLine(current.preview))}`);
     if (current.error) details.push(`   error ${sanitize(oneLine(current.error))}`);

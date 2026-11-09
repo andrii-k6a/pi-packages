@@ -2,7 +2,7 @@
 
 > Claude-Code-style dynamic workflows for [Pi](https://github.com/earendil-works/pi).
 
-A Pi extension that adds a `workflow` tool. Instead of one assistant doing everything sequentially, the model writes a small JavaScript script that fans out the work across many subagents with separate conversation contexts, then synthesizes the results. Subagents share filesystem access and the run's working directory; they are not OS- or filesystem-isolated.
+A Pi extension that adds a `workflow` tool. Instead of one assistant doing everything sequentially, the model writes a small JavaScript script that fans out the work across many subagents with separate conversation contexts, then synthesizes the results. Subagents share the run's working directory by default. Editing agents can use [Git worktree isolation](#git-worktree-isolation). Neither mode restricts filesystem access.
 
 Great for codebase audits, multi-perspective review, large refactors, and fan-out research.
 
@@ -232,16 +232,57 @@ This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, an
 | `phase(title, { profile })` | Mark the current phase and optionally select an approved profile. Used for grouping in the live progress view. |
 | `log(...values)`, `console.log/info/debug/warn/error` | Append a workflow-level log line. Every argument is recorded, space-separated; strings stay as they are and other values are inspected (`{ a: 1 }`, not `[object Object]`). A line is capped at 2,000 characters. `warn` and `error` lines are prefixed `[warn]`/`[error]`. |
 | `args` | Optional JSON object passed in via the tool's `args` parameter. |
-| `cwd`, `process.cwd()` | Current working directory for subagents. |
+| `cwd`, `process.cwd()` | Run working directory. Isolated agents use their own checkout directory. |
 | `budget` | `{ total, spent(), remaining() }` tracker. `spent()` counts tokens reported by subagents (estimating successful runs only when no usage is reported). `total` is `null` and `remaining()` is `Infinity` unless the `workflow` call sets `tokenBudget` (library: `tokenBudget` on `start`/`resume`). The limit is soft: it is checked when `agent()` is called and counts only agents that have finished, so agents started together can overshoot it. Once it is spent, `agent()` rejects with `workflow token budget exhausted`. A resumed run keeps its budget unless you pass a new `tokenBudget`; a different one replaces a live attempt. |
 
-### Failure and isolation contracts
+### Failure contracts
 
 Ordinary subagent failures return `null` and log the failure. `parallel()` and `pipeline()` also turn ordinary thrown branch/stage errors into `null`. Check for partial failures before synthesis. Cancellation and approved-profile routing failures reject instead of becoming `null`; invalid runtime options also reject before an executor is invoked. A subagent whose final message has no text answers with a failure (`null`), never with an empty string.
 
 **Limits.** `agent()` rejects once a script has made more than **500** calls in one attempt (reused results count), as a guard against runaway loops. The cap is stored with each attempt, so a replay never depends on later configuration. Raise or remove it for the Pi extension with the environment variable `PI_WORKFLOW_MAX_AGENTS` (a positive integer, or `unlimited`; a malformed value stops the extension from loading), or with `maxAgents` on `WorkflowHost`. Spend limits are separate: see `budget` above.
 
-`agent(prompt, { isolation: 'worktree' })` is a **non-enforced prompt hint**, retained for compatibility. It adds `Requested isolation: worktree` to the instructions; it does not create a Git worktree, change the subagent's directory, or restrict filesystem access. Other isolation values are rejected. Separate conversation context is not filesystem isolation.
+### Git worktree isolation
+
+Use `agent(prompt, { isolation: 'worktree' })` for agents that edit files independently:
+
+```js
+const results = await parallel(['implementation', 'alternative'].map(label => () =>
+  agent('Implement the requested change and report the files changed.', {
+    label,
+    isolation: 'worktree',
+  })
+))
+```
+
+Each fresh execution gets a unique `pi/workflow/<label>-<UUID>` branch. The checkout lives under the repository's Git common directory in `pi-workflow-worktrees/`. This keeps generated checkouts out of the parent's working files and `git status`.
+
+The starting commit is the run directory's `HEAD` when the agent is allocated. Uncommitted and untracked parent files are not copied. If the run starts in a repository subdirectory, the agent starts in the corresponding checkout subdirectory. Dependencies and build artifacts must be installed separately if needed.
+
+The built-in `read`, `write`, `edit`, and `bash` tools use the isolated directory. Agents without `isolation` keep using the shared run directory. Other isolation values are rejected. Worktrees are **not a security sandbox**. Absolute paths, shell commands, and external tools can still access other files. MCP connections and their server working directories remain run-scoped.
+
+The saved branch, path, base commit, and tool directory survive interruption. An unfinished agent continues in the same checkout. Before continuing an interrupted attempt, the host validates saved checkouts before any agent generation or tool task can restart. If validation fails, resume rejects without scheduling agents. Restore the saved checkout and branch, or abort the run. Inspection and run abort remain available.
+
+Unfinished runs from the prompt-hint implementation start a new attempt if they contain old worktree calls. The host aborts the old attempt before scheduling replacement agents. Unrelated completed calls remain reusable. A reused completed result keeps its original checkout identity without recreating files or replaying edits.
+
+If Git setup or validation fails during agent execution, that agent fails with a logged error and returns `null`. It never uses the shared directory as a substitute. Partial setup remains available for manual inspection. The extension does not reset or remove it.
+
+Select the agent in `/workflows` to see its branch, worktree path, and agent cwd. Checkouts and branches are retained after completion, failure, and cancellation. Do not remove or change branches of worktrees belonging to unfinished runs you intend to resume.
+
+Review and integrate changes explicitly. Replace the placeholders below with values from the inspector. Stage only the files you want to keep:
+
+```bash
+git -C <worktree-path> status
+git -C <worktree-path> diff
+git -C <worktree-path> add <changed-files>
+git -C <worktree-path> commit -m "Describe the change"
+# In the destination checkout, after reviewing its local changes:
+git merge <agent-branch>
+# After integration, when no unfinished agent needs this checkout:
+git worktree remove <worktree-path>
+git branch -d <agent-branch>
+```
+
+There are no automatic commits, merges, or deletions. Normal Git conflict handling applies. Cleanup intentionally uses non-forcing commands so uncommitted files or unmerged commits are not silently discarded. The interpreter-only `runWorkflow()` API forwards `isolation` to its supplied executor. Real worktree management is provided by `WorkflowHost`.
 
 ### Replay determinism requirement
 

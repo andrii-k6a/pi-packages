@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import {
   type AssistantMessage,
@@ -25,8 +27,14 @@ import { Type } from 'typebox';
 import { afterEach, beforeEach, test } from 'vitest';
 import { WorkflowAttemptDoc } from '../../src/durable/docs.js';
 import type { WorkflowRunBinding } from '../../src/durable/host.js';
-import { WorkflowHost } from '../../src/durable/host.js';
-import { listRuns } from '../../src/durable/store.js';
+import { hashScript, WorkflowHost } from '../../src/durable/host.js';
+import { listRuns, runDatabasePath } from '../../src/durable/store.js';
+import type {
+  RunCheckpoint,
+  WorkflowAgentInput,
+  WorkflowRunInput
+} from '../../src/durable/tasks/contracts.js';
+import { agentBaseKey } from '../../src/durable/tasks/run.js';
 import { WorkflowProfileRoutingError } from '../../src/profiles/contracts.js';
 
 type Responder = (request: {
@@ -90,8 +98,12 @@ function textOf(content: unknown): string {
   return content.map((part) => (part as { text?: string }).text ?? '').join('');
 }
 
-function host(): WorkflowHost {
-  const value = new WorkflowHost({ runsRoot: join(directory, 'runs'), watchIntervalMs: 20 });
+function host(options: ConstructorParameters<typeof WorkflowHost>[0] = {}): WorkflowHost {
+  const value = new WorkflowHost({
+    runsRoot: join(directory, 'runs'),
+    watchIntervalMs: 20,
+    ...options
+  });
   hosts.push(value);
   return value;
 }
@@ -202,7 +214,7 @@ test('a durable workflow fans out subagents, validates structured output, and re
   // Subagents get Pi-style prompt sections, including captured project context.
   assert.match(system, /PROJECT_RULES_MARKER/);
   assert.match(system, /subagent of a dynamic workflow/);
-  assert.match(system, /filesystem access and the working directory are shared/);
+  assert.match(system, /coding tools use the directory shown in <cwd>/);
 
   const report = await runs.report(handle.runId);
   assert.equal(report.status, 'completed');
@@ -239,6 +251,404 @@ test('a durable workflow fans out subagents, validates structured output, and re
   assert.equal(index.runId, handle.runId);
   assert.equal(index.status, 'completed');
   assert.deepEqual(index.agents, { total: 3, done: 3, error: 0, running: 0 });
+});
+
+const exec = promisify(execFile);
+async function initializeGit() {
+  await exec('git', ['init', '-q', cwd]);
+  await exec('git', ['-C', cwd, 'config', 'user.name', 'Test']);
+  await exec('git', ['-C', cwd, 'config', 'user.email', 'test@example.com']);
+  await exec('git', ['-C', cwd, 'add', '.']);
+  await exec('git', ['-C', cwd, 'commit', '-qm', 'base']);
+}
+
+const ISOLATED = `export const meta = { name: 'isolated', description: 'Edit in isolation' }
+return await agent('edit', { label: 'editor', isolation: 'worktree' })`;
+
+test('parallel worktrees bind read, write, edit, and bash to separate checkouts and preserve a nested cwd', async () => {
+  const subdirectory = join(cwd, 'project');
+  await mkdir(subdirectory);
+  await writeFile(join(subdirectory, 'notes.txt'), 'base\n');
+  await initializeGit();
+  await writeFile(join(subdirectory, 'notes.txt'), 'parent changes\n');
+  await writeFile(join(subdirectory, 'parent-only.txt'), 'untracked');
+  respond(({ prompt, toolResults, system }) => {
+    assert.match(system, /editing an isolated Git worktree/);
+    const calls = [
+      fauxToolCall('read', { path: 'notes.txt' }),
+      fauxToolCall('write', { path: 'new.txt', content: prompt }),
+      fauxToolCall('edit', { path: 'notes.txt', oldText: 'base', newText: prompt }),
+      fauxToolCall('bash', { command: 'pwd; git branch --show-current; test ! -e parent-only.txt' })
+    ];
+    if (toolResults.length > 0) assert.equal(toolResults[0], 'read:base\n');
+    return toolResults.length < calls.length
+      ? fauxAssistantMessage([calls[toolResults.length]], { stopReason: 'toolUse' })
+      : text(toolResults.at(-1) ?? '');
+  });
+  const runs = host();
+  const handle = await runs.start(
+    {
+      script: `export const meta = { name: 'parallel-edits', description: 'Edit independently' }
+return await parallel(['alpha', 'beta'].map(label => () => agent(label, { label, isolation: 'worktree' })))`,
+      cwd: subdirectory
+    },
+    binding()
+  );
+  const outcome = await handle.wait();
+  await handle.close();
+  assert.equal(outcome.status, 'completed');
+  const report = await runs.report(handle.runId);
+  const rows = Object.values(report.attempts[0].agents).sort((a, b) => a.index - b.index);
+  assert.equal(new Set(rows.map((row) => row.worktree?.path)).size, 2);
+  assert.equal(new Set(rows.map((row) => row.worktree?.branch)).size, 2);
+  for (const row of rows) {
+    assert.equal(row.status, 'done', row.error);
+    assert.ok(row.worktree);
+    assert.equal(row.worktree.cwd, join(row.worktree.path, 'project'));
+    assert.equal(await readFile(join(row.worktree.cwd, 'notes.txt'), 'utf8'), `${row.label}\n`);
+    assert.equal(await readFile(join(row.worktree.cwd, 'new.txt'), 'utf8'), row.label);
+    assert.equal(outcome.status, 'completed');
+    if (outcome.status !== 'completed') return;
+    const value = (outcome.value as string[])[['alpha', 'beta'].indexOf(row.label)];
+    assert.ok(value.includes(row.worktree.cwd));
+    assert.ok(value.includes(row.worktree.branch));
+  }
+  assert.equal(await readFile(join(subdirectory, 'notes.txt'), 'utf8'), 'parent changes\n');
+  assert.equal(await readFile(join(subdirectory, 'parent-only.txt'), 'utf8'), 'untracked');
+  assert.equal(
+    (await exec('git', ['-C', cwd, 'status', '--porcelain'])).stdout.trim(),
+    'M project/notes.txt\n?? project/parent-only.txt'
+  );
+});
+
+test('an interrupted editing agent resumes in its original worktree with its edits intact', async () => {
+  await initializeGit();
+  let waiting = false;
+  let continueAgent = false;
+  respond(async ({ toolResults, signal }) => {
+    if (!toolResults.length)
+      return fauxAssistantMessage(
+        [fauxToolCall('write', { path: 'saved.txt', content: 'saved edit' })],
+        { stopReason: 'toolUse' }
+      );
+    waiting = true;
+    if (!continueAgent)
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('closing')), { once: true });
+      });
+    return text('finished');
+  });
+  const first = host();
+  const handle = await first.start({ script: ISOLATED, cwd }, binding());
+  await until(() => waiting);
+  const before = Object.values((await first.report(handle.runId)).attempts[0].agents)[0];
+  assert.ok(before.worktree);
+  await handle.close();
+  assert.equal((await handle.wait()).status, 'interrupted');
+  assert.equal(await readFile(join(before.worktree.cwd, 'saved.txt'), 'utf8'), 'saved edit');
+  continueAgent = true;
+  const second = host();
+  const resumed = await second.resume(handle.runId, {}, binding());
+  assert.equal(resumed.mode, 'continued');
+  assert.equal((await resumed.wait()).status, 'completed');
+  await resumed.close();
+  const after = Object.values((await second.report(handle.runId)).attempts[0].agents)[0];
+  assert.deepEqual(after.worktree, before.worktree);
+  assert.equal(after.conversationId, before.conversationId);
+  assert.ok(after.worktree);
+  assert.equal(await readFile(join(after.worktree.cwd, 'saved.txt'), 'utf8'), 'saved edit');
+  assert.equal(
+    (await exec('git', ['-C', cwd, 'worktree', 'list', '--porcelain'])).stdout.match(/^worktree /gm)
+      ?.length,
+    2
+  );
+});
+
+test.each(['generation', 'tool'] as const)(
+  'resume validates persisted worktrees before any %s can edit the wrong branch',
+  async (stage) => {
+    await initializeGit();
+    let waiting = false;
+    let restart = false;
+    let restartedRequests = 0;
+    let restartedTools = 0;
+    const writer = defineExtension({
+      name: 'resumable-writer',
+      tools: [
+        defineTool({
+          name: 'resumable_write',
+          description: 'Write a note after resumption',
+          parameters: Type.Object({}),
+          replay: 'safe',
+          execute: async (_args, api, context) => {
+            if (!restart) {
+              waiting = true;
+              await new Promise<never>((_resolve, reject) => {
+                context.abortSignal?.addEventListener('abort', () => reject(new Error('closing')), {
+                  once: true
+                });
+              });
+            }
+            restartedTools++;
+            return api.executeTool(
+              'write',
+              { path: 'notes.txt', content: 'resumed edit' },
+              context
+            );
+          }
+        })
+      ]
+    });
+    respond(async ({ toolResults, signal }) => {
+      if (!restart && stage === 'generation') {
+        waiting = true;
+        await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('closing')), { once: true });
+        });
+      }
+      if (restart) restartedRequests++;
+      return toolResults.length
+        ? text('finished')
+        : fauxAssistantMessage(
+            [
+              stage === 'tool'
+                ? fauxToolCall('resumable_write', {})
+                : fauxToolCall('write', { path: 'notes.txt', content: 'resumed edit' })
+            ],
+            { stopReason: 'toolUse' }
+          );
+    });
+    const first = host({ extensions: [writer] });
+    const handle = await first.start({ script: ISOLATED, cwd }, binding());
+    await until(() => waiting);
+    const original = Object.values((await first.report(handle.runId)).attempts[0].agents)[0];
+    assert.ok(original.worktree);
+    await handle.close();
+    await exec('git', ['-C', original.worktree.cwd, 'switch', '-qc', 'wrong-branch']);
+    restart = true;
+    const second = host({ extensions: [writer] });
+    let failure: unknown;
+    try {
+      const resumed = await second.resume(handle.runId, {}, binding());
+      await resumed.wait();
+      await resumed.close();
+    } catch (error) {
+      failure = error;
+    }
+    assert.equal(
+      await readFile(join(original.worktree.cwd, 'notes.txt'), 'utf8'),
+      'durable notes\n'
+    );
+    assert.equal(restartedRequests, 0);
+    assert.equal(restartedTools, 0);
+    assert.match(String(failure), /worktree.*different branch/);
+    assert.equal(second.isActive(handle.runId), false);
+    assert.equal((await second.report(handle.runId)).status, 'interrupted');
+
+    await exec('git', ['-C', original.worktree.cwd, 'switch', '-q', original.worktree.branch]);
+    const resumed = await second.resume(handle.runId, {}, binding());
+    assert.equal(resumed.mode, 'continued');
+    const outcome = await resumed.wait();
+    assert.equal(outcome.status, 'completed');
+    await resumed.close();
+    assert.equal(await readFile(join(original.worktree.cwd, 'notes.txt'), 'utf8'), 'resumed edit');
+    assert.equal(await readFile(join(cwd, 'notes.txt'), 'utf8'), 'durable notes\n');
+  }
+);
+
+test('an unfinished legacy hint attempt is drained before isolated replacements start', async () => {
+  await initializeGit();
+  const legacyScript = `export const meta = { name: 'upgrade', description: 'Recover a legacy run' }
+const scan = await agent('scan', { label: 'scan' })
+return [scan, await agent('edit', { label: 'editor', isolation: 'worktree' })]`;
+  let waiting = false;
+  let restart = false;
+  let restartedScans = 0;
+  respond(async ({ prompt, toolResults, signal }) => {
+    if (prompt === 'scan') {
+      if (restart) restartedScans++;
+      return text('scanned');
+    }
+    if (!restart) {
+      waiting = true;
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('closing')), { once: true });
+      });
+    }
+    return toolResults.length
+      ? text('finished')
+      : fauxAssistantMessage(
+          [fauxToolCall('write', { path: 'notes.txt', content: 'isolated edit' })],
+          { stopReason: 'toolUse' }
+        );
+  });
+  const runs = host();
+  const handle = await runs.start(
+    { script: legacyScript.replace(", isolation: 'worktree'", ''), cwd },
+    binding()
+  );
+  await until(() => waiting);
+  const attempt = (await runs.report(handle.runId)).attempts[0];
+  const editor = Object.values(attempt.agents).find((row) => row.label === 'editor');
+  assert.ok(editor?.taskId);
+  await handle.close();
+
+  // Store the prompt-only isolation wire shape, including its old call key and shared cwd.
+  const legacyKey = `${agentBaseKey('edit', { requestedLabel: 'editor', instructions: 'Requested isolation: worktree' }, binding().route)}.1`;
+  const storage = await openNodeSqliteStorage(runDatabasePath(runs.runsRoot, handle.runId));
+  try {
+    const runTask = await storage.task(handle.attemptId as TaskId, BACKGROUND_CONTEXT);
+    const agentTask = await storage.task(editor.taskId as TaskId, BACKGROUND_CONTEXT);
+    assert.ok(runTask && agentTask);
+    assert.notEqual(runTask.state.status, 'terminal');
+    const checkpoint = runTask.state.checkpoint as RunCheckpoint;
+    const agents = { ...checkpoint.agents };
+    delete agents[editor.key];
+    agents[legacyKey] = editor.taskId;
+    await storage.commit(
+      [
+        {
+          type: 'task',
+          value: {
+            ...runTask,
+            input: {
+              ...(runTask.input as WorkflowRunInput),
+              script: legacyScript,
+              scriptHash: hashScript(legacyScript)
+            },
+            state: { status: 'pending', checkpoint: { ...checkpoint, agents } }
+          }
+        },
+        {
+          type: 'task',
+          value: {
+            ...agentTask,
+            input: {
+              ...(agentTask.input as WorkflowAgentInput),
+              key: legacyKey,
+              instructions: 'Requested isolation: worktree\n\nTask label: editor'
+            }
+          }
+        }
+      ],
+      BACKGROUND_CONTEXT
+    );
+  } finally {
+    await storage.close(BACKGROUND_CONTEXT);
+  }
+  const fixture = await Harness.open(
+    await openNodeSqliteStorage(runDatabasePath(runs.runsRoot, handle.runId)),
+    { models: binding().models, registry: createRegistry() },
+    BACKGROUND_CONTEXT
+  );
+  try {
+    await fixture.commit(async (tx) => {
+      const stored = await tx.doc(WorkflowAttemptDoc, String(handle.attemptId), {
+        number: 1,
+        taskId: handle.attemptId,
+        scriptHash: hashScript(legacyScript),
+        at: 0
+      });
+      delete stored.agents[editor.key];
+      stored.agents[legacyKey] = { ...editor, key: legacyKey };
+      stored.scriptHash = hashScript(legacyScript);
+    }, BACKGROUND_CONTEXT);
+  } finally {
+    await fixture.close(BACKGROUND_CONTEXT);
+  }
+
+  restart = true;
+  const resumed = await runs.resume(handle.runId, {}, binding());
+  const outcome = await resumed.wait();
+  await resumed.close();
+  assert.equal(await readFile(join(cwd, 'notes.txt'), 'utf8'), 'durable notes\n');
+  assert.equal(resumed.mode, 'retried');
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.deepEqual(outcome.value, ['scanned', 'finished']);
+  assert.equal(restartedScans, 0);
+  const report = await runs.report(handle.runId);
+  assert.equal(report.attempts.length, 2);
+  assert.equal(report.attempts[0].status, 'aborted');
+  assert.equal(report.attempts[0].agents[legacyKey].status, 'skipped');
+  const replacement = Object.values(report.attempts[1].agents).find(
+    (row) => row.label === 'editor'
+  );
+  assert.ok(replacement?.worktree);
+  assert.equal(replacement.status, 'done');
+  assert.equal(
+    await readFile(join(replacement.worktree.cwd, 'notes.txt'), 'utf8'),
+    'isolated edit'
+  );
+});
+
+test.each(['outside Git', 'without a commit', 'untracked subdirectory'])(
+  'worktree isolation fails closed %s',
+  async (state) => {
+    let runCwd = cwd;
+    if (state === 'without a commit') await exec('git', ['init', '-q', cwd]);
+    if (state === 'untracked subdirectory') {
+      await initializeGit();
+      runCwd = join(cwd, 'untracked');
+      await mkdir(runCwd);
+    }
+    respond(() => {
+      throw new Error('the model must not run without isolation');
+    });
+    const runs = host();
+    const handle = await runs.start({ script: ISOLATED, cwd: runCwd }, binding());
+    const outcome = await handle.wait();
+    await handle.close();
+    assert.equal(outcome.status, 'completed');
+    if (outcome.status === 'completed') assert.equal(outcome.value, null);
+    assert.deepEqual(prompts, []);
+    const row = Object.values((await runs.report(handle.runId)).attempts[0].agents)[0];
+    assert.equal(row.status, 'error');
+    assert.match(row.error ?? '', /Git worktree isolation failed/);
+    assert.equal(row.conversationId, undefined);
+  }
+);
+
+test('reused editing results retain worktree identity and a fresh execution gets a new checkout', async () => {
+  await initializeGit();
+  respond(() => text('done'));
+  const runs = host();
+  const script = ISOLATED.replace('return await', 'const result = await');
+  const handle = await runs.start(
+    { script: `${script}\nthrow new Error('script bug')`, cwd },
+    binding()
+  );
+  assert.equal((await handle.wait()).status, 'failed');
+  await handle.close();
+  const original = Object.values((await runs.report(handle.runId)).attempts[0].agents)[0];
+  assert.ok(original.worktree);
+  await writeFile(join(original.worktree.cwd, 'keep.txt'), 'retained');
+  prompts.length = 0;
+  const resumed = await runs.resume(
+    handle.runId,
+    {
+      script: `${script}\nreturn [result, await agent('different edit', { label: 'editor', isolation: 'worktree' })]`
+    },
+    binding()
+  );
+  assert.equal((await resumed.wait()).status, 'completed');
+  await resumed.close();
+  const rows = Object.values((await runs.report(handle.runId)).attempts[1].agents).sort(
+    (a, b) => a.index - b.index
+  );
+  assert.deepEqual(rows[0].worktree, original.worktree);
+  assert.equal(rows[0].reusedFrom, 1);
+  assert.ok(rows[1].worktree);
+  assert.notEqual(rows[1].worktree.path, original.worktree.path);
+  assert.deepEqual(prompts, ['different edit']);
+  assert.equal(await readFile(join(original.worktree.cwd, 'keep.txt'), 'utf8'), 'retained');
+});
+
+test('real isolation never reuses a legacy prompt-hint result with otherwise identical inputs', () => {
+  const options = { requestedLabel: 'editor', instructions: 'Requested isolation: worktree' };
+  assert.notEqual(
+    agentBaseKey('edit', options, undefined),
+    agentBaseKey('edit', { ...options, isolation: 'worktree' }, undefined)
+  );
 });
 
 test('nested tools receive output while structured_output stays model-only', async () => {
@@ -1184,10 +1594,13 @@ function respondHangingFirst() {
   });
 }
 
-async function startPausable(runs: WorkflowHost) {
+async function startPausable(runs: WorkflowHost, isolation?: 'worktree') {
   respondHangingFirst();
   const handle = await runs.start(
-    { script: `${AUDIT_HEADER}\nreturn await agent('work', { label: 'worker' })`, cwd },
+    {
+      script: `${AUDIT_HEADER}\nreturn await agent('work', ${JSON.stringify({ label: 'worker', isolation })})`,
+      cwd
+    },
     binding()
   );
   await until(() => prompts.includes('work'));
@@ -1295,29 +1708,59 @@ test('aborting the run does not wait for a paused agent', async () => {
   await handle.close();
 });
 
-test('an agent stays paused when its run is closed and continued, and sends nothing until resumed', async () => {
-  const runs = host();
-  const { handle, conversationId, stop } = await startPausable(runs);
-  await runs.pauseAgent(handle.runId, conversationId);
-  stop();
-  await handle.close();
-  prompts = [];
+test.each([undefined, 'worktree'] as const)(
+  'a paused agent keeps its checkout across close and resume (isolation: %s)',
+  async (isolation) => {
+    if (isolation) await initializeGit();
+    const runs = host();
+    const { handle, conversationId, stop } = await startPausable(runs, isolation);
+    const before = Object.values((await runs.report(handle.runId)).attempts[0].agents)[0];
+    if (isolation) assert.ok(before.worktree);
+    await runs.pauseAgent(handle.runId, conversationId);
+    stop();
+    await handle.close();
+    prompts = [];
 
-  const continued = await runs.resume(handle.runId, {}, binding());
-  assert.equal(continued.mode, 'continued');
-  await until(async () => {
-    const agents = (await runs.report(handle.runId)).attempts[0].agents;
-    return Object.values(agents)[0].paused === true;
-  });
-  assert.equal(await settledWithin(continued.wait(), 400), false);
-  assert.deepEqual(prompts, []);
+    const continued = await runs.resume(handle.runId, {}, binding());
+    assert.equal(continued.mode, 'continued');
+    await until(async () => {
+      const agents = (await runs.report(handle.runId)).attempts[0].agents;
+      return Object.values(agents)[0].paused === true;
+    });
+    assert.equal(await settledWithin(continued.wait(), 400), false);
+    assert.deepEqual(prompts, []);
 
-  await runs.resumeAgent(handle.runId, conversationId, 'carry on');
-  const outcome = await continued.wait();
-  assert.equal(outcome.status, 'completed');
-  if (outcome.status === 'completed') assert.equal(outcome.value, 'resumed with: carry on');
-  await continued.close();
-});
+    await runs.resumeAgent(handle.runId, conversationId, 'carry on');
+    const outcome = await continued.wait();
+    assert.equal(outcome.status, 'completed');
+    if (outcome.status === 'completed') assert.equal(outcome.value, 'resumed with: carry on');
+    await continued.close();
+    const after = Object.values((await runs.report(handle.runId)).attempts[0].agents)[0];
+    assert.deepEqual(after.worktree, before.worktree);
+  }
+);
+
+test.each(['cancel', 'abort'] as const)(
+  'worktrees and uncommitted edits survive explicit %s',
+  async (action) => {
+    await initializeGit();
+    const runs = host();
+    const { handle, conversationId, stop } = await startPausable(runs, 'worktree');
+    const before = Object.values((await runs.report(handle.runId)).attempts[0].agents)[0];
+    assert.ok(before.worktree);
+    await writeFile(join(before.worktree.cwd, 'keep.txt'), 'uncommitted edit');
+    await runs.pauseAgent(handle.runId, conversationId);
+    if (action === 'cancel') await runs.cancelAgent(handle.runId, conversationId);
+    else await handle.abort();
+    const outcome = await handle.wait();
+    assert.equal(outcome.status, action === 'cancel' ? 'completed' : 'aborted');
+    stop();
+    await handle.close();
+    const after = Object.values((await runs.report(handle.runId)).attempts[0].agents)[0];
+    assert.deepEqual(after.worktree, before.worktree);
+    assert.equal(await readFile(join(before.worktree.cwd, 'keep.txt'), 'utf8'), 'uncommitted edit');
+  }
+);
 
 test('only a working agent can be paused, and only a paused one resumed', async () => {
   const runs = host();

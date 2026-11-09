@@ -162,6 +162,7 @@ export async function runWorkflow<T = unknown>(
           phase: assignedPhase,
           profile: profileName,
           schema: normalizedOptions.schema,
+          isolation: normalizedOptions.isolation,
           signal: options.signal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           route: profile,
@@ -394,7 +395,7 @@ function normalizeSchema(value: unknown): AgentOptions['schema'] {
 
 function normalizeIsolation(value: unknown): 'worktree' | undefined {
   if (value !== undefined && value !== 'worktree') {
-    throw new TypeError('agent isolation must be "worktree" (a non-enforced prompt hint)');
+    throw new TypeError('agent isolation must be "worktree"');
   }
   return value;
 }

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import {
   createModels,
@@ -158,6 +160,61 @@ test.each(['before', 'after'] as const)(
       assert.deepEqual(result.value, ['answer alpha', 'answer beta']);
     assert.deepEqual(seen, when === 'before' ? ['beta'] : []);
     await resumed.close();
+  }
+);
+
+test.each(['before', 'after'] as const)(
+  'a %s-commit failure after worktree creation recovers the same checkout without resetting edits',
+  async (when) => {
+    const exec = promisify(execFile);
+    const git = (...args: string[]) => exec('git', ['-C', directory, ...args]);
+    await git('init', '-q');
+    await git('config', 'user.name', 'Test');
+    await git('config', 'user.email', 'test@example.com');
+    await writeFile(join(directory, 'tracked.txt'), 'base');
+    await git('add', 'tracked.txt');
+    await git('commit', '-qm', 'base');
+    interceptStorage((storage) => {
+      const commit = storage.commit.bind(storage);
+      storage.commit = async (writes, ctx) => {
+        if (
+          writes.some(
+            (write) => write.type === 'conversation' && write.value.owner?.taskId !== undefined
+          )
+        ) {
+          if (when === 'after') await commit(writes, ctx);
+          throw new Error('lost conversation commit');
+        }
+        return commit(writes, ctx);
+      };
+    });
+    respond(() => fauxAssistantMessage('done'));
+    const first = host();
+    const handle = await first.start(
+      {
+        script: `export const meta = { name: 'isolation', description: 'Recover isolation' }
+return await agent('edit', { isolation: 'worktree' })`,
+        cwd: directory
+      },
+      binding()
+    );
+    assert.equal((await handle.wait()).status, 'interrupted');
+    await handle.close();
+    vi.mocked(sqlite.openNodeSqliteStorage).mockImplementation(openNodeSqliteStorage);
+    const second = host();
+    const before = Object.values((await second.report(handle.runId)).attempts[0].agents)[0];
+    assert.ok(before.worktree);
+    await writeFile(join(before.worktree.cwd, 'keep.txt'), 'retained edit');
+    const resumed = await second.resume(handle.runId, {}, binding());
+    assert.equal((await resumed.wait()).status, 'completed');
+    await resumed.close();
+    const after = Object.values((await second.report(handle.runId)).attempts[0].agents)[0];
+    assert.deepEqual(after.worktree, before.worktree);
+    assert.equal(await readFile(join(before.worktree.cwd, 'keep.txt'), 'utf8'), 'retained edit');
+    assert.equal(
+      (await git('worktree', 'list', '--porcelain')).stdout.match(/^worktree /gm)?.length,
+      2
+    );
   }
 );
 

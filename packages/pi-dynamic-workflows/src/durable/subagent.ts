@@ -30,7 +30,7 @@ const OUTPUT_EXTENSION_PREFIX = 'workflow.output.';
 
 const PREAMBLE =
   'You are an expert coding assistant operating inside pi, a coding agent harness, as a subagent of a dynamic workflow. ' +
-  'Your conversation context is separate, but filesystem access and the working directory are shared with the workflow. ' +
+  'Your conversation context is separate. Your coding tools use the directory shown in <cwd>. Filesystem access is not restricted. ' +
   'You received one self-contained task from a workflow script. You cannot see the parent conversation and cannot ask follow-up questions, ' +
   'so work autonomously with the tools available, and end with a final answer that the workflow can use directly.';
 

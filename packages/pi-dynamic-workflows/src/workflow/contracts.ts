@@ -39,6 +39,8 @@ export interface WorkflowAgentRunOptions {
   signal?: AbortSignal;
   /** Resolved route of the effective profile; absent when the subagent inherits the session. */
   route?: ResolvedWorkflowProfile;
+  /** Run in a retained Git worktree when executed by WorkflowHost. */
+  isolation?: 'worktree';
   /** Report spend, including spend of a failed run. */
   onUsage?: (usage: Usage) => void;
 }
@@ -94,7 +96,7 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   phase?: string;
   schema?: TSchemaDef;
   profile?: string;
-  /** Non-enforced prompt hint. Does not create a worktree or change filesystem access. */
+  /** Use a retained Git worktree based on HEAD. Not a filesystem security boundary. */
   isolation?: 'worktree';
   agentType?: string;
 }
