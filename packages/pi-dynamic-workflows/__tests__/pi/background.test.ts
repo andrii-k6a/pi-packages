@@ -19,6 +19,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 import { WorkflowHost } from '../../src/durable/host.js';
 import { WorkflowBackgroundRuns } from '../../src/pi/background.js';
 import { createWorkflowRunBinding, createWorkflowTool } from '../../src/pi/workflow-tool.js';
+import type { WorkflowProfile } from '../../src/profiles/contracts.js';
 import type { WorkflowSnapshot } from '../../src/workflow/snapshot.js';
 
 let directory: string;
@@ -45,7 +46,7 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function runtime(parent = session) {
+function runtime(parent = session, profiles: WorkflowProfile[] = []) {
   const host = new WorkflowHost({ runsRoot: join(directory, 'runs'), watchIntervalMs: 5 });
   hosts.push(host);
   const messages: Parameters<ExtensionAPI['sendMessage']>[0][] = [];
@@ -76,7 +77,12 @@ function runtime(parent = session) {
     isProjectTrusted: () => false,
     isIdle: () => true,
     sessionManager: parent,
-    modelRegistry: { runtime: models },
+    modelRegistry: {
+      runtime: models,
+      find: (provider: string, id: string) =>
+        provider === 'faux' ? { provider, id, reasoning: false } : undefined,
+      getAvailable: () => [{ provider: 'faux', id: 'faux-1', reasoning: false }]
+    },
     ui: {
       setWidget: (key: string, lines: unknown) => {
         if (lines === undefined) widgets.delete(key);
@@ -89,6 +95,7 @@ function runtime(parent = session) {
   runners.push({ background, ctx });
   const tool = createWorkflowTool({
     host,
+    profiles,
     backgroundRuns: background,
     promptContext: async () => ({ contextFiles: [], skills: '', append: '' })
   });
@@ -146,6 +153,40 @@ function runId(result: { details: unknown }): string {
 const SCRIPT = `export const meta = { name: 'background_demo', description: 'Background demo' }
 phase('Investigate')
 return await agent('slow', { label: 'investigator' })`;
+
+test('background failure notices expose quota diagnostics and support explicit recovery', async () => {
+  respond(async () => {
+    throw new Error('budget_exceeded');
+  });
+  const r = runtime(session, [
+    {
+      name: 'basic',
+      description: 'Recovery',
+      provider: 'faux',
+      model: 'faux-1',
+      thinkingLevel: 'off'
+    }
+  ]);
+  const script = SCRIPT.replace(
+    "return await agent('slow', { label: 'investigator' })",
+    "const value = await agent('slow', { label: 'investigator' }); if (value === null) throw new Error('investigation failed'); return value"
+  );
+  const started = await r.execute({ script, background: true });
+  const id = runId(started);
+  await vi.waitFor(() => assert.equal(r.messages.length, 1));
+  const failure = String(r.messages[0].content);
+  assert.match(failure, /Investigate: investigator.*faux\/faux-1.*quota:.*budget_exceeded/);
+  assert.match(failure, /0 completed reusable agent result/);
+  assert.match(failure, /Wait for quota to reset/);
+  assert.match(failure, /resumeProfile/);
+  respond(async () => 'recovered');
+  await r.execute({ resume: id, resumeProfile: 'basic', background: true });
+  await vi.waitFor(() => assert.equal(r.messages.length, 2));
+  assert.match(String(r.messages[1].content), new RegExp(`/workflows ${id} --report`));
+  const latest = (await r.host.report(id)).attempts.at(-1);
+  assert.ok(latest);
+  assert.equal(Object.values(latest.agents)[0].profile, 'basic');
+});
 
 test('background returns before completion, survives the parent signal, and collects usage once', async () => {
   const gate = deferred();

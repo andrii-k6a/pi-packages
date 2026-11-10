@@ -23,6 +23,10 @@ export type WorkflowRunInput = {
   maxAgents?: number;
   /** Session model and thinking level at start; subagents without a profile use it. */
   route?: WorkflowRoute;
+  /** Logical named-profile routes retained for replay identity. */
+  profileRoutes?: Record<string, WorkflowRoute>;
+  /** Explicit recovery policy. Logical routes stay unchanged, only new executions use this pin. */
+  recovery?: { profile: string; route: WorkflowRoute };
   /** Reuse completed agent results of earlier attempts whose calls are identical. */
   reuse: boolean;
   /**
@@ -39,7 +43,7 @@ export type RunCheckpoint = {
   agents: Record<string, number>;
   /** Agent key -> earlier `workflow.agent` task whose completed result this attempt reuses. */
   reused: Record<string, number>;
-  /** Profile name -> route, resolved once on first use and stable for the attempt's replays. */
+  /** Logical profile name -> route, pinned on first use and stable for the attempt's replays. */
   routes: Record<string, WorkflowRoute>;
 };
 
@@ -58,8 +62,14 @@ export type WorkflowAgentInput = {
   /** Plain JSON Schema for structured output. */
   schema?: JsonValue;
   route?: WorkflowRoute;
+  /** Actual selected profile; key and logicalRoute retain the original call identity. */
+  profile?: string;
+  logicalRoute?: WorkflowRoute;
+  recovery?: true;
   cwd: string;
   isolation?: 'worktree';
+  /** Fixed review restriction, pinned with the task across restart. */
+  toolset?: 'review';
   /** Host-provided extensions the subagent selects, by name (see `WorkflowRunInput.extensions`). */
   extensions?: string[];
 };
@@ -90,7 +100,7 @@ export interface WorkflowTaskServices {
   /** Install an extension in this run's registry (per-schema structured output tools). */
   install(extension: Extension): void;
   /** Resolve an approved profile in the current host context; throws WorkflowProfileRoutingError. */
-  resolveProfile(name: string): WorkflowRoute;
+  resolveProfile(name: string, pinned?: WorkflowRoute): WorkflowRoute;
   /** Look up host-provided extensions by name; `missing` are names this process has not installed. */
   extensions(names: readonly string[]): { found: Extension[]; missing: string[] };
   /** What the providers opened for this run could and could not offer, one line each. */

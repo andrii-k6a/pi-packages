@@ -12,11 +12,24 @@ export function createWorkflowProfileResolver(
 ): WorkflowProfileResolver {
   const profilesByName = new Map(profiles.map((profile) => [profile.name, profile]));
 
-  return (name) => {
+  return (name, pinned) => {
     const profile = profilesByName.get(name);
-    if (!profile) throw new WorkflowProfileRoutingError(name, 'the profile is not approved');
+    if (!profile || profile.enabled === false) {
+      throw new WorkflowProfileRoutingError(name, 'the profile is not approved or is disabled');
+    }
 
-    const provider = profile.provider ?? context.model?.provider;
+    if (
+      pinned &&
+      (pinned.model.id !== profile.model ||
+        pinned.thinkingLevel !== profile.thinkingLevel ||
+        (profile.provider !== undefined && pinned.model.provider !== profile.provider))
+    ) {
+      throw new WorkflowProfileRoutingError(
+        name,
+        'the profile configuration no longer approves the saved route'
+      );
+    }
+    const provider = pinned?.model.provider ?? profile.provider ?? context.model?.provider;
     if (!provider) {
       throw new WorkflowProfileRoutingError(
         name,

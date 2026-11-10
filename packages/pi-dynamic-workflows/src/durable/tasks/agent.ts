@@ -12,6 +12,7 @@ import {
 } from '@earendil-works/pi-durable';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { emptyUsage, sumUsageState } from '../../shared/usage.js';
+import { classifyWorkflowFailure } from '../../workflow/diagnostics.js';
 import { preview } from '../../workflow/snapshot.js';
 import {
   CANCELLED_ENTRY,
@@ -24,6 +25,7 @@ import {
   WorkflowOutputDoc,
   WorkflowPauseDoc
 } from '../docs.js';
+import { ReviewTools } from '../review-tools.js';
 import { createSubagentExtension, STRUCTURED_OUTPUT_NUDGE } from '../subagent.js';
 import { ensureWorktree, planWorktree, validateWorktree } from '../worktree.js';
 import {
@@ -43,6 +45,7 @@ export const CONTINUE_MESSAGE = 'Continue.';
 
 /** Shared by every subagent conversation; selected by name in each conversation's agent. */
 export const SubagentExtension = createSubagentExtension();
+export const ReviewSubagentExtension = createSubagentExtension('review');
 
 /** Conversation intent, generation effect, and terminal accounting of one agent task. */
 export function createAgentTask(
@@ -93,7 +96,9 @@ export function createAgentTask(
           .filter(Boolean)
           .join('\n\n');
         const output = input.schema === undefined ? undefined : outputExtension(input.schema);
-        const provided = services.extensions(input.extensions ?? []);
+        const provided = services.extensions(
+          input.toolset === 'review' ? [] : (input.extensions ?? [])
+        );
         await runtime.commit(async (tx) => {
           const existing = (await tx.scanConversations({ ownerTaskId: task.id }, 1)).items[0];
           let conversationId = existing?.id;
@@ -113,12 +118,18 @@ export function createAgentTask(
               // resolves these name-only references against the registry at each use, so tools
               // return when their extension is installed on a later resume.
               // The output extension comes last so nothing can shadow `structured_output`.
-              extensions: [
-                CodingTools,
-                SubagentExtension,
-                ...(input.extensions ?? []).map((name) => ({ name })),
-                ...(output ? [output] : [])
-              ],
+              extensions:
+                input.toolset === 'review'
+                  ? [ReviewTools, ReviewSubagentExtension, ...(output ? [output] : [])]
+                  : [
+                      CodingTools,
+                      SubagentExtension,
+                      ...(input.extensions ?? []).map((name) => ({ name })),
+                      ...(output ? [output] : [])
+                    ],
+              ...(input.toolset === 'review'
+                ? { tools: [...(ReviewTools.tools ?? []), ...(output?.tools ?? [])] }
+                : {}),
               cwd: worktree?.cwd ?? input.cwd,
               ...(instructions ? { instructions } : {})
             });
@@ -206,11 +217,17 @@ export function createAgentTask(
 
         if (settled.status !== 'done' || settled.type !== 'input') {
           const reason = settled.status === 'unanswered' ? settled.reason : settled.status;
-          await finishAgent(runtime, task, context, {
-            status: 'failed',
-            error: { message: `subagent did not answer: ${reason}${detailText(settled)}` },
-            result: { value: null, usage, conversationId }
-          });
+          await finishAgent(
+            runtime,
+            task,
+            context,
+            {
+              status: 'failed',
+              error: { message: `subagent did not answer: ${reason}${detailText(settled)}` },
+              result: { value: null, usage, conversationId }
+            },
+            classifyWorkflowFailure({ detail: settled.detail, message: reason })
+          );
           return;
         }
 
@@ -365,7 +382,8 @@ async function finishAgent(
   runtime: AgentRuntime,
   task: AgentTaskState,
   context: Context,
-  outcome: TaskOutcome<WorkflowAgentTaskResult>
+  outcome: TaskOutcome<WorkflowAgentTaskResult>,
+  failureKind?: WorkflowAgentRow['failureKind']
 ): Promise<void> {
   const endedAt = runtime.now();
   const { worktree } = task.state.checkpoint;
@@ -387,9 +405,11 @@ async function finishAgent(
       } else if (outcome.status === 'aborted') {
         row.status = 'skipped';
         row.error = 'aborted';
+        row.failureKind = 'cancellation';
       } else {
         row.status = 'error';
         row.error = outcomeMessage(outcome);
+        row.failureKind = failureKind ?? classifyWorkflowFailure(outcome.error);
       }
     }
     return { status: 'terminal', outcome };

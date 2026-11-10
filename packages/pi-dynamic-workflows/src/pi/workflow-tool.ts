@@ -20,11 +20,20 @@ import type { WorkflowProfile } from '../profiles/contracts.js';
 import { createWorkflowProfileResolver } from '../profiles/routing.js';
 import { terminalLine, terminalMultiline } from '../shared/terminal-text.js';
 import { hasUsage } from '../shared/usage.js';
+import { BUILTIN_WORKFLOWS, resolveBuiltinWorkflow } from '../workflow/builtins.js';
+import { workflowFailureSummary } from '../workflow/diagnostics.js';
+import { workflowResultText } from '../workflow/result-text.js';
 import { compactSnapshot, type WorkflowSnapshot } from '../workflow/snapshot.js';
 import type { WorkflowBackgroundRuns } from './background.js';
+import { prepareCodeReviewInput } from './code-review-input.js';
 import { createToolUpdateWorkflowDisplay, renderWorkflowText } from './display.js';
 
 const workflowToolSchema = Type.Object({
+  name: Type.Optional(
+    Type.String({
+      description: `Start a built-in workflow by name instead of script. Do not combine with script or resume. Available: ${BUILTIN_WORKFLOWS.map((workflow) => `${workflow.name}: ${workflow.description}`).join('\n')}`
+    })
+  ),
   script: Type.Optional(
     Type.String({
       description:
@@ -54,6 +63,12 @@ const workflowToolSchema = Type.Object({
         'Run id of an earlier workflow to continue or retry; completed agent() results are reused.'
     })
   ),
+  resumeProfile: Type.Optional(
+    Type.String({
+      description:
+        'With resume only: keep recorded inputs and completed calls, use this approved profile only for unfinished work. Cannot combine with replacement script or args.'
+    })
+  ),
   background: Type.Optional(
     Type.Boolean({
       description:
@@ -70,9 +85,11 @@ const workflowToolSchema = Type.Object({
 });
 
 export type WorkflowToolInput = {
+  name?: string;
   script?: string;
   args?: Record<string, unknown>;
   resume?: string;
+  resumeProfile?: string;
   tokenBudget?: number;
   background?: boolean;
   status?: string;
@@ -112,7 +129,7 @@ export function createWorkflowTool(
     description:
       'Run replayable JavaScript workflows that orchestrate subagents with separate conversation context using agent(), parallel(), and pipeline(). Runs are durable and resumable by run id; subagents share filesystem access.',
     promptSnippet:
-      "Run a workflow. Required header: export const meta = { name: 'short_snake_case', description: 'non-empty description' }; call phase(title) for live progress.",
+      "Run a built-in workflow with { name, args }, or supply a script. Script header: export const meta = { name: 'short_snake_case', description: 'non-empty description' }; call phase(title) for live progress.",
     promptGuidelines: [
       'Use workflow only when the user explicitly asks for a workflow, fan-out, or multi-agent orchestration. Not for quick edits.',
       'Use raw JavaScript, no fences/TypeScript. First statement: `export const meta = ...` with non-empty name and description. meta.phases is optional metadata.',
@@ -124,10 +141,11 @@ export function createWorkflowTool(
       'Use isolation: "worktree" for independent editing agents. It retains a HEAD checkout without parent edits. Git errors fail. Not a sandbox. Merge/remove manually.',
       'Ask isolated agents for branch, checkout path, and verification results. Later agents do not automatically see their edits. Inspect via /workflows.',
       'Label agents uniquely. Give self-contained tasks and relative paths. Subagents cannot start workflows themselves.',
-      'Ordinary agent()/parallel()/pipeline() failures return null. Abort/profile routing failures reject. Check for nulls before final-agent synthesis. Return compact JSON.',
-      'Pass plain JSON Schema via opts.schema for structured output. Its root type must be "object".',
+      'agent()/parallel()/pipeline() failures return null. Abort/profile routing failures reject. Check for nulls before final-agent synthesis. Return compact JSON.',
+      'Pass plain JSON Schema via opts.schema. The root must be "object".',
       'budget.remaining() is Infinity unless tokenBudget is set (soft limit).',
-      "After failure/abort/interruption, resume: '<run id>' (plus a fixed script if needed); identical completed agent calls are reused.",
+      'Call workflow directly. It is unavailable inside codemode.',
+      'Resume reuses completed calls. Fix authentication/quota first. resumeProfile reroutes only unfinished work.',
       'Use background: true if other work can proceed; else wait for it.',
       ...profileGuidelines
     ],
@@ -160,10 +178,13 @@ export function createWorkflowTool(
           );
         }
       }
-      const script = params.script;
+      let script =
+        params.name && params.name !== 'code-review'
+          ? resolveBuiltinWorkflow(params.name, params.args)
+          : params.script;
       const resume = params.result ?? params.resume?.trim();
-      if (!script && !resume) {
-        throw new Error('workflow requires `script`, or `resume` with an earlier run id');
+      if (!script && !params.name && !resume) {
+        throw new Error('workflow requires `name`, `script`, or `resume` with an earlier run id');
       }
       if (params.background) {
         if (ctx.mode === 'print' || ctx.mode === 'json') {
@@ -184,6 +205,26 @@ export function createWorkflowTool(
         signal,
         ...(params.background ? {} : { toolCallId })
       });
+      let workflowArgs = params.args;
+      let runCwd = options.cwd ?? ctx.cwd;
+      if (params.name === 'code-review') {
+        const input = await prepareCodeReviewInput(
+          runCwd,
+          params.args,
+          binding.resolveProfile,
+          signal
+        );
+        if ('empty' in input) {
+          return {
+            content: [{ type: 'text', text: input.empty }],
+            details: { noRunStarted: true }
+          };
+        }
+        workflowArgs = { ...input.args };
+        runCwd = input.cwd;
+        script = resolveBuiltinWorkflow(params.name, workflowArgs);
+      }
+      if (signal?.aborted) throw new Error('Workflow was aborted');
       let handle: WorkflowAttemptHandle;
       try {
         handle = params.result
@@ -194,6 +235,7 @@ export function createWorkflowTool(
                 {
                   script,
                   args: params.args,
+                  resumeProfile: params.resumeProfile,
                   concurrency: options.concurrency,
                   tokenBudget: params.tokenBudget
                 },
@@ -202,8 +244,8 @@ export function createWorkflowTool(
             : await host.start(
                 {
                   script: script as string,
-                  args: params.args,
-                  cwd: options.cwd ?? ctx.cwd,
+                  args: workflowArgs,
+                  cwd: runCwd,
                   concurrency: options.concurrency,
                   tokenBudget: params.tokenBudget
                 },
@@ -280,12 +322,12 @@ export function createWorkflowTool(
       const reused = outcome.snapshot.agents.filter(
         (agent) => agent.reusedFrom !== undefined
       ).length;
-      const name = outcome.snapshot.name;
+      const name = terminalLine(outcome.snapshot.name);
       const summary = [
         `Workflow ${name} completed with ${outcome.agentCount} agent(s)`,
         reused ? ` (${reused} reused from earlier attempts)` : '',
         handle.mode === 'completed' ? ' (stored result of an already completed run)' : '',
-        `. Run id: ${handle.runId}.`
+        `. Run id: ${handle.runId}. Report available: /workflows ${handle.runId} --report.`
       ].join('');
 
       // Spend of failed or aborted attempts is returned here too, once, when the run completes.
@@ -312,15 +354,29 @@ export function createWorkflowTool(
       const title = theme.fg('toolTitle', theme.bold('workflow'));
       const suffix = action
         ? `${action} ${terminalLine(input?.[action] ?? '')}`
-        : input?.background
-          ? 'background'
-          : '';
+        : [input?.name ? terminalLine(input.name) : '', input?.background ? 'background' : '']
+            .filter(Boolean)
+            .join(' ');
       return new Text(suffix ? `${title} ${theme.fg('muted', suffix)}` : title, 0, 0);
     },
-    renderResult(result, { isPartial }, theme) {
+    renderResult(result, { isPartial, expanded }, theme) {
       const snapshot = result.details as WorkflowSnapshot | undefined;
       if (snapshot?.name) {
-        return new Text(renderWorkflowText(snapshot, !isPartial, workflowDisplayOptions), 0, 0);
+        const progress = renderWorkflowText(snapshot, !isPartial, workflowDisplayOptions);
+        const content = result.content?.[0];
+        if (expanded && !isPartial && snapshot.status === 'completed' && content?.type === 'text') {
+          const saved = content.text.split('\n\nResult:\n')[1];
+          let report = saved ?? content.text;
+          if (saved) {
+            try {
+              report = workflowResultText(JSON.parse(saved));
+            } catch {
+              /* Keep readable legacy text. */
+            }
+          }
+          return new Text(`${progress}\n\n${terminalMultiline(report)}`, 0, 0);
+        }
+        return new Text(progress, 0, 0);
       }
       const text = result.content?.[0];
       return new Text(
@@ -358,8 +414,16 @@ export function createWorkflowRunBinding(
           }
         }
       : {}),
-    resolveProfile(name) {
-      const route = resolver(name);
+    resolveProfile(name, pinned) {
+      const route = resolver(
+        name,
+        pinned === undefined
+          ? undefined
+          : {
+              model: { provider: pinned.provider, id: pinned.modelId },
+              thinkingLevel: pinned.thinkingLevel
+            }
+      );
       return {
         provider: route.model.provider,
         modelId: route.model.id,
@@ -395,17 +459,17 @@ export function workflowFailureMessage(
   outcome: Exclude<WorkflowAttemptOutcome, { status: 'completed' }>,
   runId: string
 ): string {
-  const name = outcome.snapshot.name;
-  const done = outcome.snapshot.doneCount;
-  const kept = done ? ` ${done} completed agent result(s) are saved in the run.` : '';
-  const resume = `{ "resume": "${runId}" }`;
+  const name = terminalLine(outcome.snapshot.name);
+  const diagnostics = workflowFailureSummary({ ...outcome.snapshot, runId }, outcome.error).join(
+    '\n'
+  );
   switch (outcome.status) {
     case 'aborted':
-      return `Workflow ${name} was aborted (run ${runId}).${kept} Call workflow with ${resume} to finish it without re-running completed agents.`;
+      return `Workflow ${name} was aborted (run ${runId}).\n${diagnostics}`;
     case 'interrupted':
-      return `Workflow ${name} was interrupted (run ${runId}): ${outcome.error}. Committed progress is saved. Call workflow with ${resume} to continue where it stopped.`;
+      return `Workflow ${name} was interrupted (run ${runId}). Committed progress is saved.\n${diagnostics}`;
     default:
-      return `Workflow ${name} failed: ${outcome.error} (run ${runId}).${kept} Call workflow with ${resume} to retry, adding a fixed "script" if the script was at fault; identical agent() calls reuse their completed results.`;
+      return `Workflow ${name} failed (run ${runId}).\n${diagnostics}`;
   }
 }
 
@@ -432,9 +496,29 @@ function isModelRuntime(value: unknown): value is Models {
 }
 
 function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
-  if (!args || typeof args !== 'object')
-    throw new Error('workflow requires an object argument with a script string or a resume run id');
+  if (!args || typeof args !== 'object' || Array.isArray(args))
+    throw new Error('workflow requires an object argument with a name, script, or resume run id');
   const value = args as Record<string, unknown>;
+  if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim())) {
+    throw new Error('workflow requires `name` to be a non-empty built-in workflow name');
+  }
+  if (value.name !== undefined && (value.script !== undefined || value.resume !== undefined)) {
+    throw new Error('workflow `name` cannot be combined with `script` or `resume`');
+  }
+  if (
+    value.resumeProfile !== undefined &&
+    (typeof value.resumeProfile !== 'string' ||
+      !value.resumeProfile.trim() ||
+      typeof value.resume !== 'string' ||
+      !value.resume.trim() ||
+      ['name', 'script', 'args', 'status', 'result', 'cancel'].some(
+        (key) => value[key] !== undefined
+      ))
+  ) {
+    throw new Error(
+      'resumeProfile requires resume and cannot be combined with name, script, args, status, result, or cancel'
+    );
+  }
   if (value.script !== undefined && typeof value.script !== 'string')
     throw new Error('workflow requires `script` to be a string');
   if (value.resume !== undefined && typeof value.resume !== 'string')
@@ -467,16 +551,22 @@ function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
   if (
     queries.length > 1 ||
     (queries.length === 1 &&
-      ['script', 'resume', 'args', 'tokenBudget', 'background'].some(
+      ['name', 'script', 'resume', 'resumeProfile', 'args', 'tokenBudget', 'background'].some(
         (key) => value[key] !== undefined
       ))
   ) {
     throw new Error('workflow status, result, and cancel must be used alone with a run id');
   }
-  if (value.script === undefined && value.resume === undefined && queries.length === 0)
-    throw new Error('workflow requires `script`, or `resume` with an earlier run id');
+  if (
+    value.name === undefined &&
+    value.script === undefined &&
+    value.resume === undefined &&
+    queries.length === 0
+  )
+    throw new Error('workflow requires `name`, `script`, or `resume` with an earlier run id');
   return {
     ...value,
+    ...(typeof value.name === 'string' ? { name: value.name.trim() } : {}),
     ...(typeof value.script === 'string' ? { script: normalizeWorkflowScript(value.script) } : {})
   } as WorkflowToolInput;
 }
@@ -492,14 +582,19 @@ function workflowStatusResult(
         type: 'text' as const,
         text: [
           cancelled === 'aborted' ? 'Cancellation requested. Completed work is kept.' : '',
-          `Workflow ${snapshot.name}: ${snapshot.status}. Run id: ${snapshot.runId}.`,
+          `Workflow ${terminalLine(snapshot.name)}: ${snapshot.status}. Run id: ${snapshot.runId}.`,
           `${snapshot.doneCount}/${snapshot.agentCount} agents done.`,
-          error ?? '',
+          ...(snapshot.errorCount ||
+          ['failed', 'aborted', 'interrupted'].includes(snapshot.status ?? '')
+            ? workflowFailureSummary(snapshot, error)
+            : error
+              ? [terminalLine(error)]
+              : []),
           snapshot.status === 'completed'
-            ? `Retrieve the result with { "result": "${snapshot.runId}" }.`
+            ? `Report available: /workflows ${snapshot.runId} --report. Retrieve the result with { "result": "${snapshot.runId}" }.`
             : snapshot.status === 'running'
               ? 'The run is still finishing. Continue other work rather than polling.'
-              : `To continue, call workflow with { "resume": "${snapshot.runId}" }.`
+              : ''
         ]
           .filter(Boolean)
           .join('\n')

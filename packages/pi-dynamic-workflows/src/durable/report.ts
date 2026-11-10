@@ -7,7 +7,9 @@ import type {
   LiveState,
   SubmissionId
 } from '@earendil-works/pi-durable';
+import { terminalMultiline } from '../shared/terminal-text.js';
 import { addUsage, emptyUsage } from '../shared/usage.js';
+import { workflowResultText } from '../workflow/result-text.js';
 import type {
   WorkflowAgentSnapshot,
   WorkflowRunDisplayStatus,
@@ -39,6 +41,17 @@ export interface WorkflowAttemptReport extends WorkflowAttemptState {
   args?: JsonValue;
   /** Latest unresolved compaction failure by subagent conversation, including finished agents. */
   compactionFailures?: Record<string, string>;
+}
+
+/** Reading saved output never schedules work or touches the usage delivery ledger. */
+export function savedAttemptReport(
+  attempt: Pick<WorkflowAttemptState, 'number' | 'status' | 'result'> | undefined
+): string {
+  if (!attempt) return 'No attempt is recorded. No report is available.';
+  if (attempt.status !== 'completed' || attempt.result === undefined) {
+    return `Attempt ${attempt.number} is ${attempt.status}. No saved report is available for this attempt.`;
+  }
+  return terminalMultiline(workflowResultText(attempt.result));
 }
 
 /** One readable transcript item of a subagent conversation. */
@@ -92,6 +105,7 @@ export function attemptSnapshot(
       status: row.status,
       ...(row.preview ? { resultPreview: row.preview } : {}),
       ...(row.error ? { error: row.error } : {}),
+      ...(row.failureKind ? { failureKind: row.failureKind } : {}),
       ...(row.model ? { model: row.model } : {}),
       ...(row.startedAt !== undefined ? { durationMs: (row.endedAt ?? now) - row.startedAt } : {}),
       ...(rowUsage?.totalTokens ? { tokens: rowUsage.totalTokens } : {}),

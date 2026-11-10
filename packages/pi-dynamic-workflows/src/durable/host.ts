@@ -26,6 +26,11 @@ import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { WorkflowProfileRoutingError } from '../profiles/contracts.js';
 import { optionalJsonArgument } from '../shared/json-values.js';
 import { sumUsageState } from '../shared/usage.js';
+import { CODE_REVIEW_SCRIPT } from '../workflow/builtins/code-review.js';
+import {
+  MAX_REVIEW_DIFF_CHARS,
+  validateCodeReviewArgs
+} from '../workflow/builtins/code-review-input.js';
 import { parseWorkflowScript } from '../workflow/parser.js';
 import {
   preview,
@@ -59,6 +64,7 @@ import {
   type WorkflowRunReport,
   type WorkflowTranscriptItem
 } from './report.js';
+import { ReviewTools, validateReviewTarget } from './review-tools.js';
 import {
   acquireRunLock,
   appendRunReport,
@@ -77,7 +83,7 @@ import {
   writeRunIndex
 } from './store.js';
 import { canonicalJson } from './subagent.js';
-import { SubagentExtension } from './tasks/agent.js';
+import { ReviewSubagentExtension, SubagentExtension } from './tasks/agent.js';
 import {
   AGENT_TASK_NAME,
   type AgentCheckpoint,
@@ -109,8 +115,8 @@ export interface WorkflowRunBinding {
   models: Models;
   /** Default subagent route: the parent session's model and thinking level. */
   route?: WorkflowRoute;
-  /** Resolve an approved profile; throws `WorkflowProfileRoutingError`. */
-  resolveProfile(name: string): WorkflowRoute;
+  /** Resolve an approved profile, or revalidate a pinned route without rerouting it. */
+  resolveProfile(name: string, pinned?: WorkflowRoute): WorkflowRoute;
   /** Project context for subagent prompts; captured once, when a run is created. */
   promptContext(cwd: string): Promise<WorkflowPromptContextState>;
   parentSessionFile?: string;
@@ -160,6 +166,8 @@ export interface StartWorkflowOptions {
 }
 
 export interface ResumeWorkflowOptions {
+  /** Keep recorded inputs and reuse completed calls, routing only unfinished work to this profile. */
+  resumeProfile?: string;
   /** Replacement script: a new attempt that reuses identical completed agent calls. */
   script?: string;
   args?: unknown;
@@ -255,7 +263,18 @@ export class WorkflowHost {
     options: StartWorkflowOptions,
     binding: WorkflowRunBinding
   ): Promise<WorkflowAttemptHandle> {
+    if (binding.signal?.aborted) throw new Error('Workflow was aborted');
     const { meta } = parseWorkflowScript(options.script);
+    if (options.script === CODE_REVIEW_SCRIPT) {
+      validateCodeReviewArgs(options.args, MAX_REVIEW_DIFF_CHARS);
+      if (options.args.profile !== undefined) binding.resolveProfile(options.args.profile);
+      if (options.args.mode === 'files') {
+        const env = this.#options.env
+          ? this.#options.env(options.cwd)
+          : new NodeExecutionEnv({ cwd: options.cwd });
+        await validateReviewTarget(env, options.args.path as string, context);
+      }
+    }
     const createdAt = this.#now();
     // The id has 16 random bits; never reuse a directory that already holds a run.
     let runId = createRunId(meta.name, createdAt);
@@ -266,10 +285,14 @@ export class WorkflowHost {
       throw new Error(`could not allocate a unique workflow run id (last tried ${runId})`);
     }
     const promptContext = await binding.promptContext(options.cwd);
+    if (binding.signal?.aborted) throw new Error('Workflow was aborted');
     const open = await this.#openRun(runId, binding);
     let created = false;
     try {
-      await this.#attachExtensions(open, binding, options.cwd);
+      if (options.script !== CODE_REVIEW_SCRIPT) {
+        await this.#attachExtensions(open, binding, options.cwd);
+      }
+      if (binding.signal?.aborted) throw new Error('Workflow was aborted');
       const scriptHash = hashScript(options.script);
       const args = optionalJsonArgument(options.args);
       const root = await open.harness.root(context);
@@ -341,6 +364,15 @@ export class WorkflowHost {
     binding: WorkflowRunBinding
   ): Promise<WorkflowAttemptHandle> {
     assertValidRunId(runId);
+    if (
+      options.resumeProfile !== undefined &&
+      (typeof options.resumeProfile !== 'string' ||
+        !options.resumeProfile.trim() ||
+        options.script !== undefined ||
+        options.args !== undefined)
+    ) {
+      throw new Error('resumeProfile requires unchanged recorded script and args');
+    }
     if (!runExists(this.runsRoot, runId)) throw new Error(`unknown workflow run ${runId}`);
     if (options.script !== undefined) parseWorkflowScript(options.script);
     const open = await this.#openRun(runId, binding);
@@ -358,6 +390,11 @@ export class WorkflowHost {
       const script = options.script ?? previous.script;
       const scriptHash = hashScript(script);
       const args = options.args === undefined ? previous.args : optionalJsonArgument(options.args);
+      let reviewProfile: string | undefined;
+      if (script === CODE_REVIEW_SCRIPT) {
+        validateCodeReviewArgs(args, MAX_REVIEW_DIFF_CHARS);
+        reviewProfile = args.profile;
+      }
       const sameWork =
         scriptHash === previous.scriptHash &&
         canonicalJson(args ?? null) === canonicalJson(previous.args ?? null);
@@ -374,7 +411,58 @@ export class WorkflowHost {
       ) {
         return this.#handle(open, latestId, previous.number, 'completed');
       }
-      let canContinue = live && sameWork && !budgetChanged;
+      const priorAttempt = sameWork
+        ? await harness.snapshot(WorkflowAttemptDoc, String(latestId), context)
+        : undefined;
+      const profileRoutes = sameWork
+        ? {
+            ...previous.profileRoutes,
+            ...priorAttempt?.profileRoutes,
+            ...(latest.state.checkpoint as RunCheckpoint | undefined)?.routes
+          }
+        : {};
+      // Older terminal tasks discarded checkpoints before route pins had a session-scoped home.
+      for (const row of Object.values(priorAttempt?.agents ?? {})) {
+        if (!row.profile || profileRoutes[row.profile] || row.taskId === undefined) continue;
+        const agent = await harness.getTask(row.taskId as TaskId<WorkflowAgentTaskResult>, context);
+        const route = (agent?.input as WorkflowAgentInput | undefined)?.route;
+        if (route) profileRoutes[row.profile] = route;
+      }
+      const recoveryProfile =
+        options.resumeProfile ?? (sameWork ? previous.recovery?.profile : undefined);
+      if (recoveryProfile !== undefined && sameWork) {
+        // A replacement attempt may have been stopped before resolving any logical routes.
+        for (const id of [...run.attempts].reverse()) {
+          const saved = await harness.snapshot(WorkflowAttemptDoc, String(id), context);
+          if (saved?.scriptHash !== scriptHash) continue;
+          for (const [name, route] of Object.entries(saved.profileRoutes ?? {})) {
+            profileRoutes[name] ??= route;
+          }
+        }
+      }
+      const recovery =
+        recoveryProfile === undefined
+          ? undefined
+          : {
+              profile: recoveryProfile,
+              route: binding.resolveProfile(
+                recoveryProfile,
+                previous.recovery?.profile === recoveryProfile ? previous.recovery.route : undefined
+              )
+            };
+      if (!recovery) {
+        for (const [name, route] of Object.entries(profileRoutes))
+          binding.resolveProfile(name, route);
+        if (reviewProfile !== undefined && profileRoutes[reviewProfile] === undefined) {
+          binding.resolveProfile(reviewProfile);
+        }
+      }
+      // Changing recovery policy requires a new attempt, never a mutation of in-flight generations.
+      let canContinue =
+        live &&
+        sameWork &&
+        !budgetChanged &&
+        canonicalJson(recovery ?? null) === canonicalJson(previous.recovery ?? null);
       if (canContinue) {
         const checkpoint = latest.state.checkpoint as RunCheckpoint | undefined;
         const ids = new Set([
@@ -414,7 +502,10 @@ export class WorkflowHost {
           }
         }
       }
-      await this.#attachExtensions(open, binding, previous.cwd);
+      if (script !== CODE_REVIEW_SCRIPT || previous.script !== CODE_REVIEW_SCRIPT) {
+        await this.#attachExtensions(open, binding, previous.cwd);
+      }
+      if (binding.signal?.aborted) throw new Error('Workflow was aborted');
       if (canContinue) {
         harness.resume();
         return this.#handle(open, latestId, previous.number, 'continued');
@@ -442,10 +533,16 @@ export class WorkflowHost {
           ...this.#attemptLimits(tokenBudget),
           // Keep the run's route: a different session model must not invalidate reuse.
           ...(previous.route ? { route: previous.route } : {}),
+          ...(Object.keys(profileRoutes).length ? { profileRoutes } : {}),
+          ...(recovery ? { recovery } : {}),
           reuse: true,
-          ...(open.extras.extensions.size > 0
-            ? { extensions: [...open.extras.extensions.keys()] }
-            : {})
+          ...(recovery
+            ? previous.extensions
+              ? { extensions: previous.extensions }
+              : {}
+            : open.extras.extensions.size > 0
+              ? { extensions: [...open.extras.extensions.keys()] }
+              : {})
         };
         const id = await tx.createTask(open.tasks.RunTask, input, {
           ownership: { kind: 'conversation' }
@@ -785,10 +882,10 @@ export class WorkflowHost {
           installed.add(extension.name);
           registry.install(extension);
         },
-        resolveProfile(name) {
+        resolveProfile(name, pinned) {
           if (!binding)
             throw new WorkflowProfileRoutingError(name, 'profile routing is unavailable');
-          return binding.resolveProfile(name);
+          return binding.resolveProfile(name, pinned);
         },
         extensions(names) {
           const found: Extension[] = [];
@@ -804,6 +901,8 @@ export class WorkflowHost {
       });
       registry.install(CodingTools);
       registry.install(SubagentExtension);
+      registry.install(ReviewTools);
+      registry.install(ReviewSubagentExtension);
       registry.install(
         defineExtension({ name: 'workflow.tasks', tasks: [tasks.RunTask, tasks.AgentTask] })
       );

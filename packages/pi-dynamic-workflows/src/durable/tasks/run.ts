@@ -12,6 +12,10 @@ import {
   type Tx
 } from '@earendil-works/pi-durable';
 import { jsonValue, jsonWorkflowResult } from '../../shared/json-values.js';
+import {
+  reviewOutputContract,
+  validateReviewOutput
+} from '../../workflow/builtins/code-review-output.js';
 import type { WorkflowAgentExecutor, WorkflowAgentRunOptions } from '../../workflow/contracts.js';
 import { runWorkflow } from '../../workflow/runtime.js';
 import { preview } from '../../workflow/snapshot.js';
@@ -64,6 +68,7 @@ export function createRunTask(
         await runtime.commit(async (tx) => {
           const attempt = await tx.doc(WorkflowAttemptDoc, attemptKey, seed);
           attempt.status = 'running';
+          if (input.recovery) attempt.recovery = input.recovery;
           attempt.logs = [];
           attempt.phases = [];
           delete attempt.currentPhase;
@@ -71,16 +76,20 @@ export function createRunTask(
         }, context);
 
         const reusable = input.reuse
-          ? await findReusableResults(runtime, task.id, context)
+          ? await findReusableResults(runtime, task.id, input, context)
           : new Map<string, ReusableResult>();
         const writer = createAttemptWriter(runtime, attemptKey, seed, context);
         for (const line of services.notes()) writer.log(line);
         const occurrences = new Map<string, number>();
         const pendingRoutes: Record<string, WorkflowRoute> = {};
         const routeFor = (name: string): WorkflowRoute => {
-          const known = task.state.checkpoint.routes[name] ?? pendingRoutes[name];
+          const known =
+            task.state.checkpoint.routes[name] ??
+            pendingRoutes[name] ??
+            input.profileRoutes?.[name];
           if (known) return known;
-          const resolved = services.resolveProfile(name);
+          // An unreached profile has no original route to preserve and must not block recovery.
+          const resolved = input.recovery?.route ?? services.resolveProfile(name);
           pendingRoutes[name] = resolved;
           return resolved;
         };
@@ -92,6 +101,9 @@ export function createRunTask(
             const occurrence = (occurrences.get(baseKey) ?? 0) + 1;
             occurrences.set(baseKey, occurrence);
             const key = `${baseKey}.${occurrence}`;
+            // Values built inside the script's vm realm are not plain host-realm JSON.
+            const schema = options.schema === undefined ? undefined : jsonValue(options.schema);
+            const outputContract = reviewOutputContract(schema);
 
             let agentId: number | undefined;
             let reusedResult: ReusableResult | undefined;
@@ -105,19 +117,35 @@ export function createRunTask(
                   ? reusable.get(key)
                   : (reusable.get(key) ?? (await reusableFromTask(tx, reusedId)));
               const attempt = await tx.doc(WorkflowAttemptDoc, attemptKey, seed);
-              const routes = { ...checkpoint.routes, ...pendingRoutes };
+              if (reusedResult && outputContract) {
+                try {
+                  validateReviewOutput(reusedResult.value, outputContract);
+                } catch {
+                  reusedResult = undefined;
+                  attempt.logs.push(`${options.label}: retrying incompatible saved review output`);
+                }
+              }
+              const routes = { ...input.profileRoutes, ...checkpoint.routes, ...pendingRoutes };
+              attempt.profileRoutes = routes;
               if (reusedResult) {
                 if (reusedId !== undefined) return undefined;
-                attempt.agents[key] = agentRowDraft(key, nextIndex++, prompt, options, route, {
-                  status: 'done',
-                  reusedFrom: reusedResult.attemptNumber,
-                  conversationId: reusedResult.conversationId,
-                  ...(reusedResult.worktree ? { worktree: reusedResult.worktree } : {}),
-                  usage: reusedResult.usage,
-                  preview: preview(reusedResult.value, 160),
-                  startedAt: runtime.now(),
-                  endedAt: runtime.now()
-                });
+                attempt.agents[key] = agentRowDraft(
+                  key,
+                  nextIndex++,
+                  prompt,
+                  { ...options, profile: reusedResult.profile },
+                  reusedResult.route,
+                  {
+                    status: 'done',
+                    reusedFrom: reusedResult.attemptNumber,
+                    conversationId: reusedResult.conversationId,
+                    ...(reusedResult.worktree ? { worktree: reusedResult.worktree } : {}),
+                    usage: reusedResult.usage,
+                    preview: preview(reusedResult.value, 160),
+                    startedAt: runtime.now(),
+                    endedAt: runtime.now()
+                  }
+                );
                 return {
                   status: 'running',
                   checkpoint: {
@@ -127,8 +155,11 @@ export function createRunTask(
                   }
                 };
               }
-              // Values built inside the script's vm realm are not plain host-realm JSON.
-              const schema = options.schema === undefined ? undefined : jsonValue(options.schema);
+              const executionRoute = input.recovery?.route ?? route;
+              const executionProfile = input.recovery?.profile ?? options.profile;
+              if (input.recovery) {
+                services.resolveProfile(input.recovery.profile, input.recovery.route);
+              }
               if (schema !== undefined) outputExtension(schema);
               const instructions = [
                 options.instructions,
@@ -146,17 +177,29 @@ export function createRunTask(
                   label: options.label,
                   instructions,
                   ...(schema === undefined ? {} : { schema }),
-                  ...(route ? { route } : {}),
+                  ...(executionRoute ? { route: executionRoute } : {}),
+                  ...(executionProfile ? { profile: executionProfile } : {}),
+                  ...(input.recovery
+                    ? { recovery: true as const, ...(route ? { logicalRoute: route } : {}) }
+                    : {}),
                   cwd: input.cwd,
                   ...(options.isolation ? { isolation: options.isolation } : {}),
+                  ...(options.toolset ? { toolset: options.toolset } : {}),
                   ...(input.extensions?.length ? { extensions: input.extensions } : {})
                 },
                 { ownership: { kind: 'task', taskId: task.id } }
               );
-              attempt.agents[key] = agentRowDraft(key, nextIndex++, prompt, options, route, {
-                status: 'queued',
-                taskId: agentId
-              });
+              attempt.agents[key] = agentRowDraft(
+                key,
+                nextIndex++,
+                prompt,
+                { ...options, profile: executionProfile },
+                executionRoute,
+                {
+                  status: 'queued',
+                  taskId: agentId
+                }
+              );
               return {
                 status: 'running',
                 checkpoint: {
@@ -287,6 +330,8 @@ type ReusableResult = {
   conversationId?: number;
   attemptNumber?: number;
   worktree?: WorkflowAgentTaskResult['worktree'];
+  route?: WorkflowRoute;
+  profile?: string;
 };
 
 type RunRuntime = TaskRuntime<WorkflowRunInput, RunCheckpoint, WorkflowRunTaskResult, object>;
@@ -322,7 +367,7 @@ export function agentBaseKey(
   prompt: string,
   options: Pick<
     WorkflowAgentRunOptions,
-    'requestedLabel' | 'instructions' | 'schema' | 'isolation'
+    'requestedLabel' | 'instructions' | 'schema' | 'isolation' | 'toolset'
   >,
   route: WorkflowRoute | undefined
 ): string {
@@ -334,6 +379,7 @@ export function agentBaseKey(
         instructions: options.instructions ?? null,
         schema: options.schema ?? null,
         ...(options.isolation ? { isolation: options.isolation } : {}),
+        ...(options.toolset ? { toolset: options.toolset } : {}),
         route: route ?? null
       })
     )
@@ -394,11 +440,17 @@ function createAttemptWriter(
 async function findReusableResults(
   runtime: RunRuntime,
   attemptId: number,
+  runInput: WorkflowRunInput,
   context: Context
 ): Promise<Map<string, ReusableResult>> {
   const run = await runtime.snapshot(WorkflowRunDoc, context);
   const attemptNumbers = new Map((run?.attempts ?? []).map((id, index) => [id, index + 1]));
   const results = new Map<string, ReusableResult>();
+  const attempts = new Map<number, WorkflowAttemptState>();
+  for (const id of run?.attempts ?? []) {
+    const attempt = await runtime.snapshot(WorkflowAttemptDoc, String(id), context);
+    if (attempt) attempts.set(id, attempt);
+  }
   await runtime.commit(async (tx) => {
     let cursor: Cursor | undefined;
     do {
@@ -411,7 +463,18 @@ async function findReusableResults(
         const reusable = reusableFromRecord(record, attemptNumbers);
         const input = record.input as WorkflowAgentInput;
         // Newest completed result wins; never reuse within the same attempt.
-        if (reusable && input.attemptId !== attemptId) results.set(input.key, reusable);
+        if (
+          reusable &&
+          input.attemptId !== attemptId &&
+          (!input.recovery ||
+            runInput.recovery ||
+            canonicalJson(input.logicalRoute ?? null) === canonicalJson(input.route ?? null)) &&
+          input.cwd === runInput.cwd &&
+          canonicalJson(input.extensions ?? []) === canonicalJson(runInput.extensions ?? [])
+        ) {
+          reusable.profile ??= attempts.get(input.attemptId)?.agents[input.key]?.profile;
+          results.set(input.key, reusable);
+        }
       }
       cursor = page.next;
     } while (cursor);
@@ -435,6 +498,8 @@ function reusableFromRecord(
     taskId: record.id,
     value: outcome.result.value,
     usage: outcome.result.usage,
+    ...(input.route ? { route: input.route } : {}),
+    ...(input.profile ? { profile: input.profile } : {}),
     ...(outcome.result.worktree ? { worktree: outcome.result.worktree } : {}),
     ...(outcome.result.conversationId === undefined
       ? {}

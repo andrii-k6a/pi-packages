@@ -120,6 +120,99 @@ function setup(mode: ExtensionCommandContext['mode']) {
   return { pi, ui, host, open, output };
 }
 
+const savedReport: WorkflowRunReport = {
+  ...report,
+  status: 'failed',
+  attempts: [
+    {
+      number: 1,
+      taskId: 1,
+      status: 'completed',
+      script: '',
+      scriptHash: 'saved',
+      startedAt: 1,
+      phases: ['Report'],
+      logs: [],
+      agents: {},
+      result: {
+        report: `# Stored review\n\n${'Wrapped evidence '.repeat(100)}\n\nEnd of report`
+      }
+    },
+    {
+      number: 2,
+      taskId: 2,
+      status: 'failed',
+      script: '',
+      scriptHash: 'saved',
+      startedAt: 2,
+      phases: [],
+      logs: [],
+      agents: {},
+      error: 'second attempt failed'
+    }
+  ]
+};
+
+test.each(['print', 'json', 'rpc'] as const)(
+  '/workflows --report reads only the selected attempt in %s mode',
+  async (mode) => {
+    const mocked = setup(mode);
+    mocked.host.report.mockResolvedValue({
+      ...savedReport,
+      attempts: savedReport.attempts.slice(0, 1)
+    });
+    await mocked.open('run-1 --report');
+    const text = mocked.output('info', 'run-1');
+    assert.match(text, /^# Stored review/);
+    assert.match(text, /End of report$/);
+    assert.doesNotMatch(text, /"report"/);
+  }
+);
+
+test.each(['print', 'json', 'rpc'] as const)(
+  '/workflows --report does not substitute a previous report for a failed attempt in %s mode',
+  async (mode) => {
+    const mocked = setup(mode);
+    mocked.host.report.mockResolvedValue(savedReport);
+    await mocked.open('run-1 --report');
+    const text = mocked.output('info', 'run-1');
+    assert.match(text, /Attempt 2 is failed.*No saved report/);
+    assert.doesNotMatch(text, /Stored review/);
+  }
+);
+
+test('inspector v opens the selected attempt report, wraps, scrolls, and exports without a model turn', async () => {
+  const editor = vi.fn(async () => {});
+  const browser = new WorkflowRunsBrowser(
+    { terminal: { rows: 24 }, requestRender() {} } as unknown as TUI,
+    { fg: (_color, value) => value, bold: (value) => value } as Theme,
+    userKeys,
+    { list: () => [], report: async () => savedReport } as unknown as WorkflowHost,
+    () => {
+      throw new Error('report must not request resume');
+    },
+    editor,
+    'run-1'
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  browser.handleInput('v');
+  assert.match(browser.render(100).join('\n'), /Attempt 2 is failed.*No saved report/);
+  assert.doesNotMatch(browser.render(100).join('\n'), /Stored review/);
+  browser.handleInput('\u001b');
+  browser.handleInput('[');
+  browser.handleInput('v');
+  assert.match(browser.render(60).join('\n'), /# Stored review/);
+  assert.ok(browser.render(60).filter((line) => line.includes('Wrapped evidence')).length > 1);
+  browser.handleInput(chord('l'));
+  assert.match(browser.render(60).join('\n'), /End of report/);
+  browser.handleInput('e');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(editor.mock.calls.length, 1);
+  assert.match(String((editor.mock.calls as unknown[][])[0][0]), /^# Stored review/);
+  browser.handleInput('\u001b');
+  assert.match(browser.render(120).join('\n'), /Attempt 1\/2/);
+});
+
 test.each(['print', 'json', 'rpc'] as const)(
   '/workflows lists runs in %s mode without invoking the model',
   async (mode) => {

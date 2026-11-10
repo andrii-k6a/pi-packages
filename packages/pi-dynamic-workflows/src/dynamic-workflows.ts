@@ -3,6 +3,7 @@ import { WorkflowHost } from './durable/host.js';
 import { loadWorkflowMcpAllowlist } from './durable/mcp/config.js';
 import { createMcpProvider } from './durable/mcp/provider.js';
 import { WorkflowBackgroundRuns } from './pi/background.js';
+import { registerBuiltinWorkflowCommands } from './pi/builtin-commands.js';
 import { loadWorkflowMaxAgents } from './pi/limits.js';
 import { openWorkflowProfileManager } from './pi/profiles/manager.js';
 import { openWorkflowRuns } from './pi/runs-command.js';
@@ -23,19 +24,18 @@ export default function extension(pi: ExtensionAPI) {
     ...(maxAgents === undefined ? {} : { maxAgents })
   });
   const backgroundRuns = new WorkflowBackgroundRuns(pi, host);
-  const workflowTool = createWorkflowTool({
-    profiles: loadWorkflowProfiles(),
-    host,
-    backgroundRuns
-  });
+  const options = { profiles: loadWorkflowProfiles(), host, backgroundRuns };
+  const workflowTool = createWorkflowTool(options);
   pi.registerTool(workflowTool);
+  registerBuiltinWorkflowCommands(pi, options);
   pi.registerCommand('workflow-profiles', {
     description:
       'Create, edit, delete, enable or disable, and reload approved workflow routing profiles',
     handler: async (_args, ctx) => openWorkflowProfileManager(ctx)
   });
   pi.registerCommand('workflows', {
-    description: 'Inspect, resume, abort, and delete durable workflow runs (optionally: run id)',
+    description:
+      'Inspect, resume, abort, or delete workflow runs. Use <run-id> --report for a saved report.',
     handler: async (args, ctx) => openWorkflowRuns(pi, ctx, host, args)
   });
 

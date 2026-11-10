@@ -177,6 +177,238 @@ function fanoutResponder(slow?: Promise<void>): Responder {
   };
 }
 
+test.each(['phase', 'agent'] as const)(
+  'recovery bypasses an unreached %s profile and preserves completed call identities',
+  async (selection) => {
+    const script = `export const meta = { name: 'unreached_profile', description: 'Recover a later stage' }
+phase('Find', { profile: 'basic' })
+const found = await agent('finder', { label: 'finder' })
+const gate = await agent('gate', { label: 'gate' })
+if (gate === null) throw new Error('finding incomplete')
+${selection === 'phase' ? "phase('Verify', { profile: 'unreached' })" : "phase('Verify')"}
+const verified = await agent('verifier', { label: 'verifier'${selection === 'agent' ? ", profile: 'unreached'" : ''} })
+if (verified === null) throw new Error('verification incomplete')
+return { found, verified }`;
+    const original = { provider: 'faux', modelId: 'faux-1', thinkingLevel: 'off' } as const;
+    respond(({ prompt }) => {
+      if (prompt === 'gate') throw new Error('quota_exceeded');
+      return text(prompt);
+    });
+    const firstHost = host();
+    const first = await firstHost.start(
+      { script, cwd },
+      binding({
+        resolveProfile(name) {
+          assert.equal(name, 'basic', 'verification must not start in the first attempt');
+          return original;
+        }
+      })
+    );
+    assert.equal((await first.wait()).status, 'failed');
+    await first.close();
+    assert.deepEqual(prompts, ['finder', 'gate']);
+    const initial = (await firstHost.report(first.runId)).attempts[0];
+    const finderKey = Object.values(initial.agents).find((row) => row.label === 'finder')?.key;
+    assert.ok(finderKey);
+    assert.equal(initial.profileRoutes?.unreached, undefined);
+    await firstHost.closeAll();
+
+    const replacement = { provider: 'faux', modelId: 'faux-fast', thinkingLevel: 'off' } as const;
+    const recoveryBinding = binding({
+      resolveProfile(name, pinned) {
+        if (name !== 'fast')
+          throw new WorkflowProfileRoutingError(name, 'original profile is unavailable');
+        if (pinned) assert.deepEqual(pinned, replacement);
+        return replacement;
+      }
+    });
+    const secondHost = host();
+    prompts.length = 0;
+    respond(({ prompt }) => {
+      if (prompt === 'verifier') throw new Error('provider unavailable');
+      return text(prompt);
+    });
+    const recovered = await secondHost.resume(
+      first.runId,
+      { resumeProfile: 'fast' },
+      recoveryBinding
+    );
+    assert.equal((await recovered.wait()).status, 'failed');
+    await recovered.close();
+    assert.deepEqual(prompts, ['gate', 'verifier']);
+    assert.deepEqual(
+      (await secondHost.report(first.runId)).attempts.at(-1)?.profileRoutes?.unreached,
+      replacement
+    );
+    await secondHost.closeAll();
+
+    const finalHost = host();
+    prompts.length = 0;
+    respond(({ prompt }) => text(prompt));
+    const final = await finalHost.resume(first.runId, {}, recoveryBinding);
+    const outcome = await final.wait();
+    assert.equal(outcome.status, 'completed');
+    await final.close();
+    assert.deepEqual(prompts, ['verifier']);
+    const latest = (await finalHost.report(first.runId)).attempts.at(-1);
+    assert.ok(latest);
+    assert.equal(latest.agents[finderKey].reusedFrom, 1);
+    assert.equal(latest.agents[finderKey].profile, 'basic');
+    assert.equal(latest.agents[finderKey].model, 'faux/faux-1');
+    assert.deepEqual(
+      Object.values(latest.agents)
+        .filter((row) => row.label !== 'finder')
+        .map((row) => [row.label, row.profile, row.model, row.reusedFrom]),
+      [
+        ['gate', 'fast', 'faux/faux-fast', 2],
+        ['verifier', 'fast', 'faux/faux-fast', undefined]
+      ]
+    );
+    assert.equal(latest.script, script);
+  }
+);
+
+test('recovery bypasses an unavailable workflow profile before its first call', async () => {
+  const script = `export const meta = { name: 'unresolved_default', description: 'Recover a default route', profile: 'unavailable' }
+return await agent('work', { label: 'worker' })`;
+  const runs = host();
+  const first = await runs.start({ script, cwd }, binding());
+  assert.equal((await first.wait()).status, 'failed');
+  await first.close();
+  assert.deepEqual(prompts, []);
+  respond(() => text('recovered'));
+  const recovered = await runs.resume(first.runId, { resumeProfile: 'fast' }, binding());
+  const outcome = await recovered.wait();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') assert.equal(outcome.value, 'recovered');
+  await recovered.close();
+  assert.deepEqual(prompts, ['work']);
+});
+
+test('recovery profile preserves logical calls across failed, aborted, and reopened attempts', async () => {
+  let stage = 1;
+  const script = `export const meta = { name: 'recovery', description: 'Recover unfinished work', profile: 'hard' }
+phase('Find')
+const found = await parallel(['finder-a', 'finder-b'].map(label => () => agent(label, { label })))
+if (found.includes(null)) throw new Error('finder failed')
+phase('Verify')
+const verified = await parallel(['verifier-a', 'verifier-b'].map(label => () => agent(label, { label })))
+if (verified.includes(null)) throw new Error('verifier failed')
+return { found, verified }`;
+  const route = { provider: 'faux', modelId: 'faux-1', thinkingLevel: 'off' } as const;
+  const firstBinding = binding({ resolveProfile: () => route });
+  respond(({ prompt }) => {
+    if (prompt.startsWith('verifier') || (stage === 1 && prompt === 'finder-b')) {
+      throw new Error('premium model budget_exceeded');
+    }
+    return text(prompt);
+  });
+  const runs = host();
+  const first = await runs.start({ script, cwd }, firstBinding);
+  assert.equal((await first.wait()).status, 'failed');
+  await first.close();
+  stage = 2;
+  const second = await runs.resume(first.runId, {}, firstBinding);
+  assert.equal((await second.wait()).status, 'failed');
+  await second.close();
+  // A changed-input attempt must not erase older compatible completed calls.
+  const aborted = await runs.resume(first.runId, { args: { unused: true } }, firstBinding);
+  await aborted.abort();
+  await aborted.wait();
+  await aborted.close();
+  await runs.closeAll();
+  const reopened = host();
+  const recoveryBinding = binding({
+    resolveProfile(name, pinned) {
+      assert.equal(name, 'fast', 'the disabled original profile must not authorize new work');
+      const saved = { provider: 'faux', modelId: 'faux-fast', thinkingLevel: 'off' } as const;
+      if (pinned) assert.deepEqual(pinned, saved);
+      return saved;
+    }
+  });
+  let attempts = 0;
+  respond(({ prompt }) => {
+    attempts++;
+    if (prompt === 'verifier-b') throw new Error('unknown provider failure');
+    return text(prompt);
+  });
+  const fallback = await reopened.resume(first.runId, { resumeProfile: 'fast' }, recoveryBinding);
+  assert.equal((await fallback.wait()).status, 'failed');
+  await fallback.close();
+  assert.equal(attempts, 2, 'only unfinished verifiers execute');
+  await reopened.closeAll();
+  const finalHost = host();
+  const beforeInvalid = prompts.length;
+  await assert.rejects(
+    finalHost.resume(first.runId, { resumeProfile: 'disabled' }, recoveryBinding)
+  );
+  assert.equal(prompts.length, beforeInvalid);
+  respond(({ prompt }) => text(prompt));
+  prompts.length = 0;
+  const final = await finalHost.resume(first.runId, {}, recoveryBinding);
+  const outcome = await final.wait();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed' && outcome.usageReceipt)
+    await final.acknowledgeUsage(outcome.usageReceipt.id);
+  await final.close();
+  assert.deepEqual(prompts, ['verifier-b']);
+  const stored = await finalHost.resume(
+    first.runId,
+    {},
+    binding({
+      resolveProfile: () => {
+        throw new Error('all profiles disabled');
+      }
+    })
+  );
+  const saved = await stored.wait();
+  assert.equal(saved.status, 'completed');
+  if (saved.status === 'completed') assert.equal(saved.unreportedUsage.totalTokens, 0);
+  await stored.close();
+  assert.deepEqual(prompts, ['verifier-b']);
+  const report = await finalHost.report(first.runId);
+  const latest = report.attempts.at(-1);
+  assert.ok(latest);
+  const rows = Object.values(latest.agents);
+  assert.deepEqual(
+    rows.map((row) => [row.label, row.profile, row.model, row.reusedFrom]),
+    [
+      ['finder-a', 'hard', 'faux/faux-1', 1],
+      ['finder-b', 'hard', 'faux/faux-1', 2],
+      ['verifier-a', 'fast', 'faux/faux-fast', 4],
+      ['verifier-b', 'fast', 'faux/faux-fast', undefined]
+    ]
+  );
+  assert.equal(report.attempts.at(-1)?.script, script);
+  assert.deepEqual(report.attempts.at(-1)?.args, { unused: true });
+  prompts.length = 0;
+  const changed = await finalHost.resume(
+    first.runId,
+    { script: `${script}\n// deliberate changed input` },
+    firstBinding
+  );
+  const changedOutcome = await changed.wait();
+  assert.equal(changedOutcome.status, 'completed');
+  await changed.close();
+  assert.deepEqual(
+    [...prompts].sort(),
+    ['verifier-a', 'verifier-b'],
+    'ordinary changed-input execution must not adopt recovery-only route aliases'
+  );
+  const changedAttempt = (await finalHost.report(first.runId)).attempts.at(-1);
+  assert.ok(changedAttempt);
+  const changedRows = Object.values(changedAttempt.agents);
+  assert.ok(changedRows.every((row) => row.model === 'faux/faux-1' && row.profile === 'hard'));
+  if (changedOutcome.status === 'completed')
+    assert.equal(
+      changedOutcome.unreportedUsage.totalTokens,
+      changedRows
+        .filter((row) => row.reusedFrom === undefined)
+        .reduce((total, row) => total + (row.usage?.totalTokens ?? 0), 0),
+      'reused work is not billed again'
+    );
+});
+
 test('a durable workflow fans out subagents, validates structured output, and records everything', async () => {
   let system = '';
   respond(async (request) => {

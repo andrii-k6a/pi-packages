@@ -399,6 +399,55 @@ test('profile resolver enforces a session-scoped thinking level pin', () => {
   );
 });
 
+test('a saved profile route survives a parent-provider switch but still needs approval, availability, and scope', () => {
+  const target = model('original', 'fast');
+  const profile = {
+    name: 'fast',
+    description: 'Fast',
+    model: 'fast',
+    thinkingLevel: 'low' as const
+  };
+  const pinned = { model: target, thinkingLevel: 'low' as const };
+  const changed = context(model('new-parent', 'current'), [target]);
+  assert.deepEqual(createWorkflowProfileResolver([profile], changed)('fast', pinned), pinned);
+  assert.throws(() => createWorkflowProfileResolver([], changed)('fast', pinned), /not approved/);
+  assert.throws(
+    () => createWorkflowProfileResolver([{ ...profile, enabled: false }], changed)('fast', pinned),
+    /disabled/
+  );
+  assert.throws(
+    () =>
+      createWorkflowProfileResolver([profile], context(undefined, [target], []))('fast', pinned),
+    /unavailable/
+  );
+  assert.throws(
+    () =>
+      createWorkflowProfileResolver([profile], {
+        ...changed,
+        scopedModels: [{ model: model('new-parent', 'current') }]
+      })('fast', pinned),
+    /outside.*scope/
+  );
+  assert.throws(
+    () =>
+      createWorkflowProfileResolver([profile], {
+        ...changed,
+        scopedModels: [{ model: target, thinkingLevel: 'high' }]
+      })('fast', pinned),
+    /session-scoped.*pin/
+  );
+  for (const update of [
+    { model: 'different' },
+    { provider: 'different' },
+    { thinkingLevel: 'high' as const }
+  ]) {
+    assert.throws(
+      () => createWorkflowProfileResolver([{ ...profile, ...update }], changed)('fast', pinned),
+      /saved route/
+    );
+  }
+});
+
 test('profile resolver fails loudly for invalid routes', () => {
   const profile = {
     name: 'fast',
@@ -410,6 +459,10 @@ test('profile resolver fails loudly for invalid routes', () => {
   assert.throws(
     () => createWorkflowProfileResolver([profile], context())('missing'),
     /profile is not approved/
+  );
+  assert.throws(
+    () => createWorkflowProfileResolver([{ ...profile, enabled: false }], context())('fast'),
+    /disabled/
   );
   assert.throws(
     () =>

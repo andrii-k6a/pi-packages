@@ -34,7 +34,7 @@ Just ask Pi for a workflow in plain language:
 Run a workflow to inspect this repository and summarize the main modules.
 ```
 
-The model will write a workflow script and call the `workflow` tool. Live progress shows up inline:
+The model can write a workflow script or select a built-in, then call the `workflow` tool. Live progress shows up inline:
 
 ```text
 ◆ Workflow: inspect_project (3/3 done)
@@ -48,6 +48,86 @@ The model will write a workflow script and call the `workflow` tool. Live progre
 Rows also show duration, tokens, the model/profile in use, and what each running subagent is doing right now (for example `bash: npm test`, `thinking`, or `retrying (attempt 2): 429`). Extensions that call other tools show the nested work, such as `codemode → bash: 3 passed`, rather than just the orchestrator. Unresolved compaction failures appear as warnings, including after the agent finishes. The footer shows the run id, attempt, elapsed time, and spend.
 
 Press `Esc` to cancel a foreground workflow. Active subagents are aborted bottom-up and surfaced as skipped, **completed results are kept**, and the error names the run id so the model (or you) can resume it. To follow, steer, or stop a single agent instead, use [`/workflows`](#workflows).
+
+### Built-in code review
+
+Review changes or inspect existing code without generating a workflow script. Choose what you want reviewed first:
+
+| Your intention | Command | What gets reviewed |
+| --- | --- | --- |
+| Review work in progress | `/code-review` | Local changes against `HEAD`, including eligible untracked files. |
+| Review a feature branch | `/code-review --base main` | The checked-out branch's changes since its common ancestor with `main`, including local edits and eligible untracked files. |
+| Audit the current project | `/code-review --files .` | Existing code under the current directory, including pre-existing problems. Git is unnecessary. |
+
+Then narrow or guide the review:
+
+| Your intention | Example | Effect |
+| --- | --- | --- |
+| Limit the review to a directory | `/code-review src` | Review only local changes under `src`. Use `--files src` instead to audit its existing code. |
+| Focus on a particular concern | `/code-review --files --goal "Audit XYZ and its integration" src` | Audit existing code in `src` with these instructions. `--goal` also works for change reviews. |
+| Exclude untracked additions | `/code-review --base origin/main --tracked-only src` | Review branch and local changes under `src`, excluding untracked files. Not available with `--files`. |
+| Select an approved model profile | `/code-review --files --profile thorough "source directory"` | Audit existing code using the configured `thorough` profile for every reviewer and verifier. |
+
+You can combine options before one optional literal path:
+
+```text
+/code-review --base main --goal "Review the new API contract" --profile thorough src
+```
+
+Put natural-language instructions in `--goal`, not the positional path. The path is not a Git range or PR number. Quote values containing spaces. Use `--` before a dash-prefixed path, for example `/code-review -- --dash-prefixed-path`.
+
+The command starts a background run in TUI or RPC mode. Use `/workflows` to inspect progress. The main agent retrieves the result through the [background delivery path](#background-execution).
+
+Default **change mode** records the current `HEAD` commit and captures staged and unstaged changes against that exact base, including in an existing worktree. It also includes non-ignored untracked regular UTF-8 text files without changing the index or checkout. `--tracked-only` explicitly excludes these additions. The result records included additions and material exclusions, such as binary files and symlinks. An empty scope starts no reviewers. Git errors, including a repository with no initial commit, require explicit `--files` rather than silently widening the scope. The combined diff limit is 200,000 characters. Oversize input is rejected with narrowing guidance, never truncated.
+
+Use `--base <ref>` to compare the current working tree against the merge base of that locally available ref and captured `HEAD`. On a clean checkout this reviews committed feature-branch changes. On a dirty checkout it also includes staged and unstaged edits and eligible untracked additions, unless `--tracked-only` excludes the additions. The report identifies this broader scope and records the requested ref, resolved tips, and comparison commit.
+
+Remote-tracking refs such as `origin/main` work, but no fetch occurs. Missing refs, unrelated histories, and multiple merge bases fail without fallback. Capture does not switch branches, stage, stash, or alter refs. For committed-only review, use a clean checkout or supply a prepared diff.
+
+Explicit **file mode** (`--files`) inspects existing code, including pre-existing problems, using live discovery and focused reads. It needs neither changes nor Git. Omit the path to inspect the current directory. Missing, unreadable, and explicit symlink targets fail before review. Directory discovery skips VCS internals, dependency caches, generated output, binary contents, and symlinks by default. Select an actual regular file explicitly to bypass directory ignores. Bounded results do not imply every file was reviewed.
+
+Both modes inherit the parent model and reasoning level unless `--profile <name>` selects one [enabled, approved profile](#approved-routing-profiles). The selected profile applies to every finder and verifier. Merely defining profiles changes no default. Unknown, disabled, unavailable, or session-incompatible selections fail without fallback. The examples using `thorough` require a profile with that name.
+
+The model uses the same input preparation through `workflow`. A new named start with omitted `args`, `{}`, or `{ "mode": "changes" }` captures local changes automatically. The parent model does not need to read the diff first:
+
+```json
+{ "name": "code-review" }
+```
+
+```json
+{
+  "name": "code-review",
+  "args": {
+    "base": "main",
+    "path": "src",
+    "goal": "Review XYZ and its failure handling",
+    "profile": "thorough"
+  }
+}
+```
+
+```json
+{
+  "name": "code-review",
+  "args": { "mode": "files", "path": ".", "goal": "Audit XYZ and its integration" }
+}
+```
+
+Automatic capture accepts optional `base`, `path`, and boolean `trackedOnly` (default false). No path selects the whole repository. An explicit path is relative to the calling directory. Captured Git reviews run at the repository root, including from subdirectories and existing worktrees, so diff locations stay repository-relative.
+
+To supply a diff instead, call `{ "name": "code-review", "args": { "diff": "<unified diff>", "goal": "Review error propagation" } }`. This also accepts optional `mode: "changes"`, `diffSource` (a description, not a command), `baseCommit` (for historical reads), and existing capture metadata. Do not combine a supplied diff with `base`, `path`, or `trackedOnly`. The diff stays authoritative and never gains unrelated local files. Git is unnecessary unless historical evidence is requested. An empty or invalid explicit diff fails, rather than triggering capture.
+
+Named file mode requires a non-empty `path`, relative to the run directory. It rejects diff/capture fields, `base`, and `trackedOnly`. Both modes accept optional `goal` and `profile`. Goal text reaches every finder and verifier unchanged. Neither entry point invents a goal or copies the parent conversation. Reviewers must respect exclusions in discovery and recursive searches by narrowing to included directories or explicit files. Natural-language exclusions are guidance, not tool-enforced filters.
+
+`name` cannot be combined with `script` or `resume`. Named starts support `background` and `tokenBudget`. Resume by run id, without `name`, to use the stored script, prepared inputs, and run directory without recapturing changes. Replacement args on resume must already be prepared. Reviewing newer edits requires a new named start.
+
+Three independent reviewers examine **behavior and reliability**, **architecture and integration**, and **maintainability and scope**. Architecture owns project structure. Maintainability includes simplicity, meaningful tests, comments, and concise documentation. Each returns at most five candidates and material limitations. Conservative deduplication assigns one fresh verifier per distinct candidate. Ordinary code renders a deterministic report with confirmed findings first, uncertain concerns next, and refutations retained in run records. Verifiers can identify one underlying cause across differently worded candidates. The report combines matching verdicts, retains their evidence, and keeps one canonical conclusion and remedy. Ambiguous claims and different verdicts remain separate. Standard inspection caveats appear once, alongside specific missing evidence. A successful cycle uses **3 + N agent calls**, where N is zero to fifteen. The Report phase runs in code, not another agent, and shows `· code` instead of an agent counter. Failed or unusable investigations stop the run rather than producing a clean review.
+
+The result contains `total` (candidates checked), `findings`, `report`, `limitations`, and `scope` with mode, target, path base, and any captured additions or exclusions. The Markdown report uses separate finding blocks and counts candidates, distinct confirmed findings, and uncertain findings. Required text, paths, and earlier duplicate references are checked inside `structured_output`, so the model can correct invalid output before it becomes reusable success. Change mode requires an introduced or materially worsened problem. File mode can report pre-existing problems. Both require concrete consequences or present maintenance costs, counterevidence checks, and proportionate alternatives.
+
+Reviewers have only `read`, `ls`, `find`, `grep`, restricted `git_inspect`, and `structured_output`. Editing, arbitrary commands, tests/builds, MCP, and third-party tools are rejected at execution time, including after restart. `find` and `grep` require `rg` in the host execution environment. Git is optional for historical inspection. Unavailable tools become explicit evidence limitations, never a local-machine fallback. The review reader preserves literal filenames and reads from one opened regular UTF-8 file without following a final-component symlink. Read results remain bounded to 2,000 lines or 50KB, with continuation guidance or an explicit oversized-line limitation. This is static inspection and an application tool restriction, not an OS sandbox. Fixed review starts and unchanged fixed-review resumes do not open MCP or other tool providers they cannot use. Workflow persistence still writes run state. Existing recorded scripts retain their recorded behavior unless explicitly replaced.
+
+Files are live, not immutable snapshots, in both modes. Reviewers must report unavailable or drifted evidence. [Resume](#resuming) can reuse completed work but is not a fresh audit after edits. Start a new invocation after repairs. Existing concurrency controls and the soft token budget still apply.
 
 ### Background execution
 
@@ -98,9 +178,28 @@ Call the tool with `resume`:
 | Run state | `resume` does |
 | --- | --- |
 | Interrupted by a crash, quit, `/reload`, or session switch | Continues the **same attempt** in place from its durable checkpoints. Finished subagents are not repeated; a subagent that was mid-turn resumes from its last committed model request or tool call. |
-| Failed or aborted | Starts a **new attempt** that reuses every completed `agent()` call whose request is identical. The run keeps the model and thinking level it started with: they are part of each call's identity, so switching the session model first would discard every reusable result. To change models, start a new run. |
+| Failed or aborted | Starts a **new attempt** that reuses completed identical `agent()` calls. Recorded routes stay pinned by default. Use explicit recovery below to change only unfinished work. |
 | Failed because of a script bug | Pass a fixed `script` as well: identical `agent()` calls (same prompt, label, schema, instructions, and route) reuse their results, so you fix a broken synthesis step without paying for 20 agents again. |
 | Already completed | Returns the stored result at no cost. |
+
+Same-input retries retain resolved named-profile routes as well as the inherited session route. Ordinary resume rechecks profile approval, saved-route compatibility, model availability, and session scope before continuing work. Changing the parent provider alone does not reroute saved work. A disabled profile or a profile configuration that no longer approves the saved route blocks ordinary continuation. Retrieving an already completed result does not revalidate profiles or start model work.
+
+Failures, `workflow { "status": "<run-id>" }`, progress, the inspector, and background notices expose grouped causes with stage, agent labels, profile, actual provider/model, and saved-result counts. Authentication failures require signing in to the affected provider through Pi `/login` before resume. Quota exhaustion requires waiting for quota to reset or explicitly choosing another approved profile. A rate-limit 429 alone is not treated as exhausted quota. Unknown errors retain their diagnostic text and do not promise that retry will fix them.
+
+To keep completed work and use an approved profile only for unfinished calls:
+
+```json
+{
+  "resume": "20261012-185628-inspect_project-3f9a",
+  "resumeProfile": "basic"
+}
+```
+
+`resumeProfile` requires `resume`. It cannot accompany `name`, replacement `script` or `args`, or status/result/cancel queries. `background: true` is supported in TUI and RPC modes. There is no automatic fallback. Changing `args.profile` remains a deliberate input change, not recovery.
+
+Recovery reuses compatible results across the whole run history, including before failed or aborted attempts. Reused rows retain their original route and source attempt. New calls record the recovery route. Later same-input resumes retain that recovery policy and its pinned provider, including after restart. The selected recovery profile must still be enabled, approved, available, in scope, and compatible with its saved pin. Completed old-provider work needs no new authorization for that provider. Profiles not reached in earlier attempts use the recovery route without requiring their original provider or profile to remain available. A changed policy replaces an interrupted attempt after stopping its owned work, never a generation in flight.
+
+Recovery keeps the recorded script, arguments, review input, and captured context. It does not recapture Git changes or make reused findings fresh. Start a new review after editing the target.
 
 Interrupted runs are announced when a session starts in the same directory. Spend of an attempt that failed or was aborted is not lost: the attempt that completes the run returns it to the session.
 
@@ -110,6 +209,8 @@ A tool call cut off by a crash follows Pi Durable's replay rules: `read` and `st
 
 ### Storage failures and upgrading
 
+Upstream limitation: installed `@earendil-works/pi-ai` 1.3.0 treats `429` with `error.type: "budget_exceeded"` as retryable. Pi Durable uses that classifier and exposes no classifier override in its retry settings. Workflow diagnostics do not fix those extra requests. Reproduce offline with `node packages/pi-dynamic-workflows/__tests__/fixtures/quota-retry.mjs` from the repository root. The proposed upstream regression must require `false` for budget-exceeded 429/400 responses and `true` for a transient rate-limit 429. The narrow upstream fix is to classify `budget_exceeded` as non-retryable before the generic 429 match.
+
 Pi Durable 1.2.0 and later treat storage errors (including reads) as fatal to the open session. It cancels active invocations and closes storage; this host then releases providers and the run lease, even when no caller is waiting. The workflow is reported as **interrupted**, not durably failed: its error includes the cause and run id, and its last observed snapshot is retained when storage can no longer be read. Fix the underlying storage problem, then resume to recover from committed state. The failed session is never retried in place.
 
 A storage error can occur after a commit succeeded but before it was acknowledged. Such a run is never deleted as a failed start. Inspect it with `/workflows <runId>`; an initial failure before the run record was actually committed may leave only a recoverable listing entry, not a resumable workflow. A failure while offering usage likewise leaves the completed result and ledger available for reconciliation on resume.
@@ -117,6 +218,14 @@ A storage error can occur after a commit succeeded but before it was acknowledge
 Upgrading to Pi Durable 1.3.0 needs no run migration: its storage layout is unchanged, and runs created with 1.2.0 (completed, interrupted, and aborted) were verified to open, inspect, and resume. Existing workflow documents stay at their current versions. Pi Durable migrates live 1.1 `pi.tool` records on resume; the stored replay policy is preserved. Back up important run directories before upgrading, and do not reopen migrated runs with Pi Durable 1.1. Library extensions must update their tool results from `{ content: [...] }` to `{ output: [...] }`; the parent Pi `workflow` tool still returns `content` because that is a separate API.
 
 ### `/workflows`
+
+Open a saved result directly, without a model turn:
+
+```text
+/workflows <run-id> --report
+```
+
+The command shows the latest attempt's stored Markdown report, or readable JSON/text for other workflows. In the run view, `v` opens the selected attempt's report. Failed attempts and attempts without results say that no report is available, rather than showing an earlier attempt's result. The inspector's failed-attempt report view also provides scrollable diagnostics and recovery instructions. Reports wrap and scroll with the transcript navigation keys. `e` opens the complete report in your editor. Report access works after reopening Pi without an active model, provider login, or unused tool providers. It does not resume work or acknowledge usage intended for parent-model delivery. Completed tool output links to this command and includes the result when expanded.
 
 An interactive inspector (`/workflows <runId>` jumps to one run):
 
@@ -133,7 +242,7 @@ An interactive inspector (`/workflows <runId>` jumps to one run):
 
   The editor is chosen like Pi's `Ctrl+G`: the global `externalEditor` setting, then `$VISUAL`, then `$EDITOR`. The command is split on spaces, so `nvim -R` works but quoted arguments do not. A graphical editor must wait for the file to close, for example `code --wait`.
 
-Non-interactive modes return the same text summary without calling the model:
+Non-interactive modes return the summary or requested saved report without calling the model:
 
 - **Print** (`pi -p "/workflows"`): summaries go to stdout; errors go to stderr.
 - **JSON** (`pi --mode json "/workflows"`): native `message_start`/`message_end` events carry a custom message with `customType: "workflow-runs"`. Its `content` is the summary and `details.isError` identifies errors; single-run queries also include `details.runId`. Stdout remains JSONL.
@@ -191,7 +300,7 @@ Subagents inherit the active session model and thinking level by default. To all
 }
 ```
 
-See `examples/profiles.json` for a complete configuration example. The file is user-owned and is loaded at extension startup or `/reload`. It is optional; without it, workflows retain normal session inheritance. Set the optional top-level `"enabled": false` (default `true`) to turn all profiles off without deleting them. Set `"enabled": false` (default `true`) on a single profile to turn off only that one. The `workflow` tool stops listing disabled profiles, and a workflow that selects one, including a resumed run that used it, fails as it does for any unapproved name. Configuration is strict: malformed JSON, unknown keys, duplicate or blank fields, and invalid thinking levels stop the extension from loading rather than being ignored.
+See `examples/profiles.json` for a complete configuration example. The file is user-owned and is loaded at extension startup or `/reload`. It is optional; without it, workflows retain normal session inheritance. Set the optional top-level `"enabled": false` (default `true`) to turn all profiles off without deleting them. Set `"enabled": false` (default `true`) on a single profile to turn off only that one. The `workflow` tool stops listing disabled profiles, and new selections fail as they do for any unapproved name. See [Resuming](#resuming) for approval checks on saved work and the stored-result exception. Configuration is strict: malformed JSON, unknown keys, duplicate or blank fields, and invalid thinking levels stop the extension from loading rather than being ignored.
 
 Manage profiles inside Pi with `/workflow-profiles`. The full-width manager supports `j`/`k` or arrow navigation, `Enter`/`e` to edit, `n` to create, `d` to delete with confirmation, `Space` to enable or disable the selected profile, `t` to enable or disable all profiles, `r` to reload, and `q`/`Esc` to close. Creation and editing use a consistent five-step wizard for name, description, provider, model, and thinking level; use `Shift+Tab` to revisit an earlier step (or left arrow while choosing from a list). It only offers currently available (and, when configured, session-scoped) provider/model/thinking combinations. Choosing the active session provider intentionally omits `provider` from the saved profile. The runtime reloads after each successful change so the `workflow` tool immediately uses the saved profiles.
 
@@ -328,7 +437,7 @@ Under the hood each distinct schema gets a `structured_output` tool whose parame
 
 ## Tools and extensions for subagents
 
-By default a subagent has Pi Durable's coding tools (`read`, `write`, `edit`, `bash`) and, when you ask for a schema, `structured_output`. Subagents run unattended, so nothing else is shared with them unless you approve it. There are two ways to add tools.
+By default a subagent has Pi Durable's coding tools (`read`, `write`, `edit`, `bash`) and, when you ask for a schema, `structured_output`. Scripts can select `agent(prompt, { toolset: 'review' })` for the fixed [review toolset and restrictions](#built-in-code-review). This selection is part of durable agent identity and excludes all extra extensions for that conversation. Subagents run unattended, so nothing else is shared with them unless you approve it. There are two ways to add tools to ordinary workflows.
 
 ### MCP servers
 
@@ -402,7 +511,7 @@ The Pi extension does **not** enable these capabilities automatically or inherit
 
 Pi (coding-agent) extensions are not loaded into subagents: Pi Durable has its own extension model and no loader for them. Port the parts a subagent needs: a tool becomes `defineTool` (returning `output`, not `content`), prompt text a `section()`, `tool_call`/`tool_result` handlers `hook(ToolTask, …)`, state a `defineDoc`. Commands and UI have no equivalent because subagents are headless; model access comes from the parent's `ModelRuntime`. Durable codemode and tool search are available through explicit library configuration as shown above, not through Pi's extension loader.
 
-**Parent safeguards do not apply to subagents.** Subagents run unattended with Pi Durable's `bash`, `write`, and `edit`. A permission gate, protected-path rule, or any other `tool_call` handler in a Pi extension sees the parent's `workflow` call, but not the commands and edits its subagents perform. Treat approving a workflow as approving everything its subagents may do in the working directory. Pi's own tool restrictions still apply to the `workflow` tool itself: `--no-tools`, `--tools`, and `--exclude-tools workflow` keep it off. Library hosts can enforce a policy on subagent tools with `hook(ToolTask, { beforeTool })` in a Pi Durable extension.
+**Parent safeguards do not apply to subagents.** Ordinary subagents run unattended with Pi Durable's `bash`, `write`, and `edit`. The fixed [review toolset](#built-in-code-review) is the exception. A permission gate, protected-path rule, or any other `tool_call` handler in a Pi extension sees the parent's `workflow` call, but not the commands and edits its subagents perform. Treat approving an ordinary workflow as approving everything its subagents may do in the working directory. Pi's own tool restrictions still apply to the `workflow` tool itself: `--no-tools`, `--tools`, and `--exclude-tools workflow` keep it off. Library hosts can enforce a policy on subagent tools with `hook(ToolTask, { beforeTool })` in a Pi Durable extension.
 
 ## How it works
 
@@ -421,7 +530,7 @@ user prompt
 - **Effect sandwich.** An agent first commits its intent (the conversation and a checkpoint), then performs the work, then commits the outcome with usage. Prompts are submitted with idempotent request ids, so a restart reattaches to the same submission instead of asking twice.
 - **Model access.** Subagents use Pi's own `ModelRuntime` (Pi Durable accepts it as pi-ai `Models`), so they share the session's providers, auth, and request transforms. A subagent runs on the session model and thinking level unless a profile routes it elsewhere; the route is recorded per agent.
 - **Prompts.** Subagents get a Pi-style system prompt (rules, `AGENTS.md`/project context, skills, working directory) captured once when the run is created, so a resumed run keeps the same prompt and warm provider caches. Provider failures retry durably (3 retries with backoff) and long contexts compact automatically.
-- **Tools.** Subagents use Pi Durable's `read`, `write`, `edit`, and `bash` (an interrupted `read` simply runs again), plus `structured_output` when a schema is requested, plus any [approved MCP tools and extensions](#tools-and-extensions-for-subagents). The `workflow` tool is not available to them, so they cannot start nested workflows.
+- **Tools.** Ordinary subagents use Pi Durable's `read`, `write`, `edit`, and `bash` (an interrupted `read` simply runs again), plus `structured_output` when a schema is requested, plus any [approved MCP tools and extensions](#tools-and-extensions-for-subagents). Review agents use the fixed [inspection-only toolset](#built-in-code-review). The `workflow` tool is not available to them, so they cannot start nested workflows.
 - **Usage.** Subagent token usage and cost are summed from each conversation's durable usage ledger (failed and aborted attempts included) and returned to the parent session with the completed result and a crash-safe receipt (see [Resuming](#resuming)). `budget.spent()` counts reported tokens, falling back to an estimate for successful agents that report none; reused results count toward `budget.spent()` in the script, but not toward the new attempt's reported spend.
 
 ### Differences from the previous in-memory backend
@@ -439,7 +548,7 @@ import { WorkflowHost, createMcpProvider, runWorkflow } from '@andrii-k6a/pi-dyn
 import type { WorkflowRunBinding, WorkflowExtensionProvider } from '@andrii-k6a/pi-dynamic-workflows';
 ```
 
-`WorkflowHost.start(options, binding)` and `resume(runId, options, binding)` accept `tokenBudget` next to `script`, `args`, and `concurrency`; the host option `maxAgents` (default `DEFAULT_MAX_AGENTS`, 500) caps `agent()` calls per attempt. Both return a handle with `wait()`, `watch()`, `abort()`, `acknowledgeUsage()`, and `close()`. A binding supplies pi-ai `Models`, the default `route`, approved-profile resolution, and captured prompt context. Always close handles (or `host.closeAll()` on shutdown); closing releases resources without aborting durable work. If `wait()` returns a usage receipt, durably record it with the usage before acknowledging it. See [Resuming](#resuming) for crash-safe delivery.
+`WorkflowHost.resume(runId, { resumeProfile }, binding)` supports the same [explicit recovery](#resuming) policy as the tool. `WorkflowHost.start(options, binding)` and `resume(runId, options, binding)` accept `tokenBudget` next to `script`, `args`, and `concurrency`; the host option `maxAgents` (default `DEFAULT_MAX_AGENTS`, 500) caps `agent()` calls per attempt. Both return a handle with `wait()`, `watch()`, `abort()`, `acknowledgeUsage()`, and `close()`. A binding supplies pi-ai `Models`, the default `route`, approved-profile resolution, and captured prompt context. Always close handles (or `host.closeAll()` on shutdown); closing releases resources without aborting durable work. If `wait()` returns a usage receipt, durably record it with the usage before acknowledging it. See [Resuming](#resuming) for crash-safe delivery.
 
 `WorkflowHost.result(runId, binding)` opens only a completed result and returns the same handle without scheduling work. It rejects unfinished, failed, or aborted runs. Receipt acknowledgement and handle cleanup follow the same rules as `start()` and `resume()`.
 
@@ -479,12 +588,12 @@ Internal module responsibilities (these are not public import paths):
 
 | Area | Main modules and responsibilities |
 | --- | --- |
-| `src/workflow/` | `contracts.ts` holds metadata/executor/status contracts; `parser.ts` and `validation.ts` validate scripts; `sandbox.ts` constructs the VM; `runtime.ts` orchestrates injected executors; `snapshot.ts` holds renderer-independent projections and preview helpers. |
+| `src/workflow/` | `contracts.ts` holds metadata/executor/status contracts; `parser.ts` and `validation.ts` validate scripts; `sandbox.ts` constructs the VM; `runtime.ts` orchestrates injected executors; `builtins.ts` resolves named templates in `builtins/`; `snapshot.ts` holds renderer-independent projections and preview helpers. |
 | `src/profiles/` | `contracts.ts` defines profiles and routing errors; `config.ts` validates and atomically saves user-owned files; `routing.ts` resolves approved routes without loading configuration or UI. |
 | `src/durable/` | `host.ts` drives runs; `docs.ts` owns durable records; `store.ts` owns directories and leases; `open-run.ts` owns open resources; `billing.ts`/`usage-delivery.ts` reconcile receipts; `report.ts` maps records to snapshots/transcripts; `providers.ts`/`extension-admission.ts` define and validate host extensions; `subagent.ts` supplies prompt/output extensions. |
 | `src/durable/tasks/` | `factory.ts` wires `run.ts` and `agent.ts` to a per-run schema cache. `contracts.ts` owns replay inputs/checkpoints/services; `outcome.ts` formats authoritative task outcomes. |
 | `src/durable/mcp/` | `config.ts` reads allowlists and Pi's MCP settings; `provider.ts` owns shared connections and approved durable tools. |
-| `src/pi/` | `workflow-tool.ts` adapts Pi calls to the host; `background.ts` owns session-scoped execution and result-ready recovery; `runs-command.ts` implements `/workflows`; `display.ts` renders plain snapshots and forwards a progress update only when its picture changed; `limits.ts` reads `PI_WORKFLOW_MAX_AGENTS`. |
+| `src/pi/` | `workflow-tool.ts` adapts Pi calls to the host; `background.ts` owns session-scoped execution and result-ready recovery; `runs-command.ts` implements `/workflows`; `builtin-commands.ts` captures review input and launches built-ins; `display.ts` renders plain snapshots and forwards a progress update only when its picture changed; `limits.ts` reads `PI_WORKFLOW_MAX_AGENTS`. |
 | `src/pi/profiles/` | `manager.ts` orchestrates `/workflow-profiles`; `list.ts` and `wizard.ts` own interaction state; `choices.ts` filters models and thinking levels for the current Pi session. |
 | `src/shared/` | Neutral `terminal-text.ts`, `json-values.ts`, and `usage.ts` helpers, without dependencies on workflow, durable, or UI modules. |
 

@@ -11,7 +11,8 @@ import {
 } from '@earendil-works/pi-ai';
 import { afterEach, beforeEach, test } from 'vitest';
 import type { WorkflowUsageReceipt } from '../../src/durable/billing.js';
-import { WorkflowHost } from '../../src/durable/host.js';
+import { WorkflowHost, type WorkflowHostOptions } from '../../src/durable/host.js';
+import { openWorkflowRuns } from '../../src/pi/runs-command.js';
 import { createWorkflowRunBinding, createWorkflowTool } from '../../src/pi/workflow-tool.js';
 
 let directory: string;
@@ -40,8 +41,8 @@ const SCRIPT =
   "export const meta = { name: 'billing', description: 'd' }; return await agent('work')";
 const promptContext = async () => ({ contextFiles: [], skills: '', append: '' });
 
-function runtime() {
-  const host = new WorkflowHost({ runsRoot: join(directory, 'runs') });
+function runtime(options: WorkflowHostOptions = {}) {
+  const host = new WorkflowHost({ runsRoot: join(directory, 'runs'), ...options });
   hosts.push(host);
   const tool = createWorkflowTool({ host, promptContext });
   return { host, tool };
@@ -130,7 +131,37 @@ test('a crash before parent persistence re-offers usage without rerunning any su
   const original = receipt(lost);
   await first.host.closeAll(); // No parent append: same persisted state as a crash before delivery.
 
-  const second = runtime();
+  let providerOpens = 0;
+  const second = runtime({
+    providers: [
+      {
+        name: 'unused',
+        async open() {
+          providerOpens++;
+          return { extensions: [], notes: [], close: async () => {} };
+        }
+      }
+    ]
+  });
+  const messages: unknown[] = [];
+  await openWorkflowRuns(
+    {
+      sendUserMessage: () => {
+        throw new Error('report must not start a model turn');
+      },
+      sendMessage: (message) => {
+        messages.push(message);
+      }
+    },
+    {
+      mode: 'json'
+    } as never,
+    second.host,
+    `${original.runId} --report`
+  );
+  assert.match(JSON.stringify(messages), /ok/);
+  assert.equal(faux.state.callCount, 1, 'report access after reopen requires no provider call');
+  assert.equal(providerOpens, 0, 'report access must not open unused tool providers');
   const retry = await second.tool.execute(
     'call-2',
     { resume: original.runId },

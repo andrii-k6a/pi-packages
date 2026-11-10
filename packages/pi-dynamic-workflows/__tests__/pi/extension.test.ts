@@ -44,6 +44,7 @@ function setup(run: WorkflowRunIndex) {
   const notify = vi.fn<ExtensionContext['ui']['notify']>();
   return {
     notify,
+    pi,
     async start(hasUI = true) {
       await start(
         { type: 'session_start' },
@@ -89,6 +90,14 @@ test.each([
   assert.equal(tone, 'warning');
   assert.doesNotMatch(message, /[\p{Cc}\u202e]/u);
   assert.deepEqual(run, before);
+});
+
+test('the extension registers the built-in review command alongside its existing commands', () => {
+  const { pi } = setup(interrupted);
+  assert.deepEqual(
+    vi.mocked(pi.registerCommand).mock.calls.map(([name]) => name),
+    ['code-review', 'workflow-profiles', 'workflows']
+  );
 });
 
 test('startup without UI does not emit an interrupted workflow notification', async () => {

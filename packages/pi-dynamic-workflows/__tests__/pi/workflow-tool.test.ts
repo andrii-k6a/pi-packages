@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,15 +7,17 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxText,
+  fauxToolCall,
   type TranscriptContext
 } from '@earendil-works/pi-ai';
-import { afterEach, beforeEach, test } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import { WorkflowHost } from '../../src/durable/host.js';
 import {
   createWorkflowRunBinding,
   createWorkflowTool,
   workflowFailureMessage
 } from '../../src/pi/workflow-tool.js';
+import { resolveBuiltinWorkflow } from '../../src/workflow/builtins.js';
 import type { WorkflowSnapshot } from '../../src/workflow/snapshot.js';
 
 let directory: string;
@@ -76,6 +78,168 @@ const a = await agent('quick scan', { label: 'quick' })
 const b = await agent('slow scan', { label: 'slow' })
 return { a, b }`;
 
+test.each([
+  [
+    'OAuth refresh failed: SSO cookies expired. Run /login faux again.',
+    'authentication',
+    /Pi \/login before resuming/
+  ],
+  ['429 {"error":{"type":"budget_exceeded"}}', 'quota', /Wait for quota to reset/],
+  ['unexpected provider payload', 'unknown', /cause is not classified/]
+] as const)(
+  'tool and status expose %s with saved work and route diagnostics',
+  async (cause, kind, guidance) => {
+    host = new WorkflowHost({
+      runsRoot: join(directory, 'runs'),
+      watchIntervalMs: 5,
+      settings: { retry: { enabled: false } }
+    });
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    respond(async (prompt) => {
+      if (prompt === 'broken') throw new Error(cause);
+      await ready;
+      return 'preserved result';
+    });
+    const tool = createWorkflowTool({
+      host,
+      promptContext,
+      profiles: [
+        {
+          name: 'hard',
+          description: 'Review',
+          provider: 'faux',
+          model: 'faux-1',
+          thinkingLevel: 'off'
+        }
+      ]
+    });
+    let observed = false;
+    await assert.rejects(
+      tool.execute(
+        'failure',
+        {
+          script: `export const meta = { name: 'diagnostic', description: 'Check diagnostics', profile: 'hard' }
+phase('Verify')
+const results = await parallel(['broken', 'sibling'].map(label => () => agent(label, { label })))
+if (results.includes(null)) throw new Error('A verifier failed')
+return results`
+        },
+        undefined,
+        (update) => {
+          if ((update.details as WorkflowSnapshot).errorCount > 0) {
+            observed = true;
+            assert.match(update.content[0].type === 'text' ? update.content[0].text : '', guidance);
+            release();
+          }
+        },
+        toolContext()
+      ),
+      (error) => {
+        assert.match(String(error), new RegExp(kind));
+        assert.match(String(error), /Verify: broken \[profile hard, faux\/faux-1\]/);
+        assert.match(String(error), /1 completed reusable agent result/);
+        assert.match(String(error), guidance);
+        return true;
+      }
+    );
+    assert.equal(observed, true, 'failure becomes visible while the sibling is still running');
+    const runId = host.list()[0].runId;
+    const status = await tool.execute(
+      'status',
+      { status: runId },
+      undefined,
+      undefined,
+      toolContext()
+    );
+    assert.equal(status.content[0].type, 'text');
+    assert.match(status.content[0].type === 'text' ? status.content[0].text : '', guidance);
+    assert.equal(faux.state.callCount, 2);
+  }
+);
+
+test.each(['disabled', 'missing', 'unavailable', 'out-of-scope'] as const)(
+  'a %s recovery profile launches no new agents',
+  async (scenario) => {
+    respond(async (prompt) => {
+      if (prompt === 'slow scan') throw new Error('quota_exceeded');
+      return 'saved';
+    });
+    const initial = createWorkflowTool({ host, promptContext });
+    await assert.rejects(
+      initial.execute(
+        'start',
+        {
+          script: SCRIPT.replace(
+            'return { a, b }',
+            "if (b === null) throw new Error('unfinished'); return { a, b }"
+          )
+        },
+        undefined,
+        undefined,
+        toolContext()
+      ),
+      /unfinished/
+    );
+    const id = host.list()[0].runId;
+    const tool = createWorkflowTool({
+      host,
+      promptContext,
+      profiles:
+        scenario === 'missing'
+          ? []
+          : [
+              {
+                name: 'recovery',
+                description: 'Recovery',
+                provider: 'faux',
+                model: scenario === 'unavailable' ? 'faux-fast' : 'faux-1',
+                thinkingLevel: 'off',
+                enabled: scenario !== 'disabled'
+              }
+            ]
+    });
+    const ctx =
+      scenario === 'out-of-scope'
+        ? ({
+            ...(toolContext() as object),
+            scopedModels: [{ model: { provider: 'faux', id: 'another' } }]
+          } as never)
+        : toolContext();
+    const before = faux.state.callCount;
+    await assert.rejects(
+      tool.execute('recover', { resume: id, resumeProfile: 'recovery' }, undefined, undefined, ctx),
+      /Cannot route workflow profile/
+    );
+    assert.equal(faux.state.callCount, before);
+    assert.equal((await host.report(id)).attempts.length, 1);
+  }
+);
+
+test('resumeProfile arguments are explicit, exclusive recovery requests', () => {
+  const tool = createWorkflowTool({ host, promptContext });
+  for (const input of [
+    { resumeProfile: 'basic' },
+    { resume: 'run-1', resumeProfile: ' ' },
+    ...['args', 'script', 'name', 'status', 'result', 'cancel'].map((key) => ({
+      resume: 'run-1',
+      resumeProfile: 'basic',
+      [key]: key === 'args' ? {} : 'value'
+    }))
+  ])
+    assert.throws(() => tool.prepareArguments?.(input), /resumeProfile|cannot be combined/);
+  assert.deepEqual(
+    tool.prepareArguments?.({ resume: 'run-1', resumeProfile: 'basic', background: true }),
+    { resume: 'run-1', resumeProfile: 'basic', background: true }
+  );
+  assert.match(
+    tool.promptGuidelines?.join('\n') ?? '',
+    /workflow directly.*unavailable inside codemode/s
+  );
+});
+
 test('workflow tool runs a durable workflow, streams progress, and reports its run id and spend', async () => {
   respond(async (prompt) => `done: ${prompt}`);
   const tool = createWorkflowTool({ host, promptContext });
@@ -98,6 +262,21 @@ test('workflow tool runs a durable workflow, streams progress, and reports its r
   assert.ok(updates.length > 0);
   assert.equal(updates.at(-1)?.name, 'tool_demo');
   assert.equal(host.list()[0].parentSessionFile, join(directory, 'parent.jsonl'));
+  const theme = { fg: (_: string, value: string) => value } as never;
+  const collapsed =
+    tool
+      .renderResult?.(result, { expanded: false, isPartial: false }, theme, {} as never)
+      ?.render(120)
+      .join('\n') ?? '';
+  const expanded =
+    tool
+      .renderResult?.(result, { expanded: true, isPartial: false }, theme, {} as never)
+      ?.render(120)
+      .join('\n') ?? '';
+  assert.doesNotMatch(collapsed, /done: quick scan/);
+  assert.match(collapsed, new RegExp(`/workflows ${runId} --report`));
+  assert.match(expanded, /"a": "done: quick scan"/);
+  assert.equal(faux.state.callCount, 2);
 });
 
 test('Esc aborts subagents, the error names the run, and resume finishes without repeating work', async () => {
@@ -150,9 +329,9 @@ test('Esc aborts subagents, the error names the run, and resume finishes without
   assert.deepEqual(seen, ['slow scan']);
 });
 
-test('workflow tool requires a script or a resume run id, and rejects unknown runs', async () => {
+test('workflow tool requires a name, script, or resume run id, and rejects unknown runs', async () => {
   const tool = createWorkflowTool({ host, promptContext });
-  assert.throws(() => tool.prepareArguments?.({}), /requires `script`, or `resume`/);
+  assert.throws(() => tool.prepareArguments?.({}), /requires `name`, `script`, or `resume`/);
   await assert.rejects(
     tool.execute('call-1', { resume: '../escape' }, undefined, undefined, toolContext()),
     /invalid workflow run id/
@@ -167,6 +346,246 @@ test('workflow tool requires a script or a resume run id, and rejects unknown ru
     ),
     /unknown workflow run/
   );
+});
+
+test('named code review persists its resolved script and resumes without repeating completed review work', async () => {
+  let finders = 0;
+  let verifiers = 0;
+  const candidate = {
+    file: 'service.ts',
+    line: 4,
+    summary: 'The error is lost',
+    evidence: 'The caller ignores failure',
+    priority: 2,
+    scenario: 'A failed request reports success',
+    alternative: '',
+    references: [{ file: 'service.ts', line: 4, observation: 'Failure reports success' }]
+  };
+  faux.setResponses(
+    Array.from({ length: 50 }, () => async (context: TranscriptContext) => {
+      const user = context.messages.find((message) => message.role === 'user');
+      const prompt = typeof user?.content === 'string' ? user.content : '';
+      const verifying = prompt.includes('Evaluate this candidate as a hypothesis');
+      if (verifying) {
+        verifiers++;
+        if (verifiers === 1) {
+          return fauxAssistantMessage([], { stopReason: 'error', errorMessage: 'provider down' });
+        }
+      } else finders++;
+      return fauxAssistantMessage(
+        [
+          fauxToolCall(
+            'structured_output',
+            verifying
+              ? {
+                  ...candidate,
+                  summary: 'Surface request failures',
+                  verdict: 'CONFIRMED',
+                  reason: 'The caller loses the error',
+                  counterevidence: 'No caller guard handles it',
+                  limitations: []
+                }
+              : { candidates: [candidate], limitations: [] }
+          )
+        ],
+        { stopReason: 'toolUse' }
+      );
+    })
+  );
+  const args = { diff: '-old\n+new', diffSource: 'test diff' };
+  const tool = createWorkflowTool({ host, promptContext });
+  await assert.rejects(
+    tool.execute('review-1', { name: 'code-review', args }, undefined, undefined, toolContext()),
+    /code review verifier failed/
+  );
+  const runId = host.list()[0].runId;
+  const saved = await host.report(runId);
+  assert.equal(saved.attempts[0].script, resolveBuiltinWorkflow('code-review', args));
+  assert.deepEqual(saved.attempts[0].args, args);
+  assert.equal(finders, 3);
+  assert.equal(verifiers, 1);
+
+  await host.closeAll();
+  host = new WorkflowHost({ runsRoot: join(directory, 'runs'), watchIntervalMs: 10 });
+  const resumed = await createWorkflowTool({ host, promptContext }).execute(
+    'review-2',
+    { resume: runId },
+    undefined,
+    undefined,
+    toolContext()
+  );
+  assert.equal(finders, 3);
+  assert.equal(verifiers, 2);
+  assert.ok(resumed.usage?.totalTokens);
+  const text = resumed.content[0];
+  assert.ok(text?.type === 'text');
+  assert.match(text.text, /3 reused from earlier attempts/);
+  assert.match(text.text, /Surface request failures/);
+  const expanded =
+    tool
+      .renderResult?.(resumed, { expanded: true, isPartial: false }, {} as never, {} as never)
+      ?.render(120)
+      .join('\n') ?? '';
+  assert.match(expanded, /# Code review/);
+  assert.match(expanded, /Surface request failures/);
+  assert.doesNotMatch(expanded, /"report":/);
+  assert.equal(verifiers, 2, 'expansion must not regenerate the report');
+});
+
+test('named workflow arguments reject ambiguous actions and invalid built-ins before creating a run', async () => {
+  const tool = createWorkflowTool({ host, promptContext });
+  for (const input of [
+    { name: 'code-review', script: SCRIPT },
+    { name: 'code-review', resume: 'run-1' },
+    { name: 'code-review', status: 'run-1' },
+    { name: 'code-review', result: 'run-1' },
+    { name: 'code-review', cancel: 'run-1' },
+    { name: '' },
+    { name: 5 }
+  ]) {
+    assert.throws(
+      () => tool.prepareArguments?.(input),
+      /cannot be combined|must be used alone|non-empty built-in/
+    );
+  }
+  assert.deepEqual(tool.prepareArguments?.({ name: ' code-review ', args: { diff: 'x' } }), {
+    name: 'code-review',
+    args: { diff: 'x' }
+  });
+  for (const input of [{ name: 'missing' }, { name: 'code-review', args: { diff: ' ' } }]) {
+    await assert.rejects(
+      tool.execute('bad-review', input, undefined, undefined, toolContext()),
+      /Unknown built-in|args.diff/
+    );
+  }
+  assert.equal(host.list().length, 0);
+  const name = tool.parameters.properties.name as { description?: string };
+  assert.match(
+    name.description ?? '',
+    /code-review.*behavior, architecture, and maintainability.*args:.*diff: string.*goal.*baseCommit/s
+  );
+});
+
+test.each(['files', 'supplied'])(
+  'goal reaches finders and independent verification without Git (%s)',
+  async (mode) => {
+    await writeFile(join(cwd, 'service.ts'), 'export const success = () => true;\n');
+    await writeFile(join(cwd, 'unrelated.ts'), 'must not be added to supplied patches\n');
+    const goal = 'Audit "errors"; $(touch nope)\nwithout inventing requirements';
+    const candidate = {
+      file: 'service.ts',
+      line: 1,
+      summary: 'Failures report success',
+      evidence: 'The result is always true',
+      priority: 2,
+      scenario: 'A failed request is reported as successful',
+      alternative: '',
+      references: [{ file: 'service.ts', line: 1, observation: 'No failure path' }]
+    };
+    let finders = 0;
+    let verifiers = 0;
+    faux.setResponses(
+      Array.from({ length: 20 }, () => async (context: TranscriptContext) => {
+        const user = context.messages.find((message) => message.role === 'user');
+        const prompt = typeof user?.content === 'string' ? user.content : '';
+        assert.ok(
+          prompt.includes(JSON.stringify(goal)),
+          'goal must arrive unchanged, not summarized'
+        );
+        const verifying = prompt.includes('Evaluate this candidate as a hypothesis');
+        if (verifying) verifiers++;
+        else finders++;
+        return fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'structured_output',
+              verifying
+                ? {
+                    ...candidate,
+                    verdict: 'CONFIRMED',
+                    reason: 'Failure is not propagated',
+                    counterevidence: 'No caller guard',
+                    limitations: []
+                  }
+                : { candidates: [candidate], limitations: [] }
+            )
+          ],
+          { stopReason: 'toolUse' }
+        );
+      })
+    );
+    const args =
+      mode === 'files'
+        ? { mode: 'files', path: '.', goal }
+        : {
+            mode: 'changes',
+            diff: '-old\n+new',
+            diffSource: 'prepared patch',
+            baseCommit: 'HEAD',
+            goal
+          };
+    vi.stubEnv('PATH', '');
+    try {
+      const result = await createWorkflowTool({ host, promptContext }).execute(
+        'goal',
+        { name: 'code-review', args },
+        undefined,
+        undefined,
+        toolContext()
+      );
+      assert.match(JSON.stringify(result.content), /Failures report success/);
+      const saved = await host.report((result.details as { runId: string }).runId);
+      assert.deepEqual(saved.attempts[0].args, args, 'prepared inputs remain authoritative');
+      assert.equal(finders, 3);
+      assert.equal(verifiers, 1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }
+);
+
+test('invalid capture forms fail before Git or model work, including explicit invalid diffs', async () => {
+  const tool = createWorkflowTool({ host, promptContext });
+  for (const args of [
+    { diff: undefined },
+    { diff: null },
+    { diff: 1 },
+    { diff: '' },
+    { diff: 'patch', base: 'main' },
+    { diff: 'patch', path: 'src' },
+    { diff: 'patch', trackedOnly: false },
+    { mode: 'files', path: '.', diff: undefined },
+    { mode: 'files', path: '.', base: 'main' },
+    { mode: 'files', path: '.', trackedOnly: false },
+    { mode: 'files' },
+    { mode: 'wrong' },
+    { base: '' },
+    { base: 1 },
+    { trackedOnly: 'true' },
+    { path: '' },
+    { goal: 1 },
+    { diffSource: 'prepared' },
+    { baseCommit: 'HEAD' },
+    { capture: {} }
+  ]) {
+    await assert.rejects(
+      tool.execute('bad', { name: 'code-review', args }, undefined, undefined, toolContext()),
+      /Code review/,
+      JSON.stringify(args)
+    );
+  }
+  await assert.rejects(
+    tool.execute(
+      'profile',
+      { name: 'code-review', args: { profile: 'missing' } },
+      undefined,
+      undefined,
+      toolContext()
+    ),
+    /not approved/
+  );
+  assert.equal(host.list().length, 0);
+  assert.equal(faux.state.callCount, 0);
 });
 
 test('createWorkflowRunBinding forwards the parent model runtime, route, and profiles', () => {
@@ -186,6 +605,17 @@ test('createWorkflowRunBinding forwards the parent model runtime, route, and pro
   });
   assert.throws(() => binding.resolveProfile('slow'), /not approved/);
   assert.equal(binding.parentSessionFile, join(directory, 'parent.jsonl'));
+});
+
+test('Pi bindings revalidate a saved profile on its original provider after the session provider changes', () => {
+  const context = toolContext() as { model: { provider: string; id: string } };
+  const binding = createWorkflowRunBinding(context as never, {
+    profiles: [{ name: 'fast', description: 'Fast', model: 'faux-1', thinkingLevel: 'off' }]
+  });
+  const pinned = binding.resolveProfile('fast');
+  context.model = { provider: 'different', id: 'other' };
+  assert.deepEqual(binding.resolveProfile('fast', pinned), pinned);
+  assert.throws(() => binding.resolveProfile('fast'), /does not expose/);
 });
 
 test('project trust is scoped to the canonical calling directory, including prompt discovery', async () => {
@@ -219,14 +649,14 @@ test('createWorkflowRunBinding fails clearly when Pi runtime is unavailable', ()
 });
 
 test('failure messages tell the model how to resume', () => {
-  const snapshot = { name: 'demo', doneCount: 2 } as WorkflowSnapshot;
+  const snapshot = { name: 'demo', doneCount: 2, agents: [] } as unknown as WorkflowSnapshot;
   assert.match(
     workflowFailureMessage({ status: 'failed', error: 'boom', snapshot }, 'run-1'),
-    /failed: boom \(run run-1\)\. 2 completed agent result\(s\) are saved.*\{ "resume": "run-1" \}.*fixed "script"/
+    /failed \(run run-1\)\.\nboom\n2 completed reusable agent result\(s\) saved[\s\S]*cause is not classified[\s\S]*\{ "resume": "run-1" \}[\s\S]*resumeProfile/
   );
   assert.match(
     workflowFailureMessage({ status: 'interrupted', error: 'x', snapshot }, 'run-1'),
-    /interrupted \(run run-1\): x\. Committed progress is saved/
+    /interrupted \(run run-1\)\. Committed progress is saved\.\nx/
   );
 });
 

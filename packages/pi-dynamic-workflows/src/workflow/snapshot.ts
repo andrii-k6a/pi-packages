@@ -1,5 +1,10 @@
 import type { Usage } from '@earendil-works/pi-ai';
-import type { WorkflowAgentStatus, WorkflowMeta, WorkflowRunStatus } from './contracts.js';
+import type {
+  WorkflowAgentStatus,
+  WorkflowFailureKind,
+  WorkflowMeta,
+  WorkflowRunStatus
+} from './contracts.js';
 
 /** A renderer-independent projection; durable code need not depend on Pi UI modules. */
 export interface WorkflowAgentSnapshot {
@@ -11,6 +16,7 @@ export interface WorkflowAgentSnapshot {
   status: WorkflowAgentStatus;
   resultPreview?: string;
   error?: string;
+  failureKind?: WorkflowFailureKind;
   /** `provider/model` the subagent ran with. */
   model?: string;
   durationMs?: number;

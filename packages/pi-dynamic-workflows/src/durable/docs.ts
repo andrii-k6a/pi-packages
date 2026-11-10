@@ -1,7 +1,11 @@
 import type { JsonRepresentation, JsonValue } from '@earendil-works/chord';
 import type { ModelThinkingLevel, Usage } from '@earendil-works/pi-ai';
 import { defineDoc, defineDocFamily } from '@earendil-works/pi-durable';
-import type { WorkflowAgentStatus, WorkflowAttemptStatus } from '../workflow/contracts.js';
+import type {
+  WorkflowAgentStatus,
+  WorkflowAttemptStatus,
+  WorkflowFailureKind
+} from '../workflow/contracts.js';
 import type { WorkflowWorktree } from './worktree.js';
 
 export type { WorkflowAttemptStatus } from '../workflow/contracts.js';
@@ -94,6 +98,7 @@ export type WorkflowAgentRow = {
   usage?: StoredUsage;
   preview?: string;
   error?: string;
+  failureKind?: WorkflowFailureKind;
   /** The user stopped the agent; its `agent()` call waits until they resume or cancel it. */
   paused?: boolean;
 };
@@ -110,6 +115,9 @@ export type WorkflowAttemptState = {
   currentPhase?: string;
   logs: string[];
   agents: Record<string, WorkflowAgentRow>;
+  /** Route pins survive terminal task checkpoint cleanup, for same-input retries. */
+  profileRoutes?: Record<string, WorkflowRoute>;
+  recovery?: { profile: string; route: WorkflowRoute };
   error?: string;
   /** Completed attempts only: the JSON-serializable workflow return value. */
   result?: JsonValue;

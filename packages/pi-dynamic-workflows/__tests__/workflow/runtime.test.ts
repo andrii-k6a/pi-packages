@@ -524,6 +524,34 @@ return await agent('real')`,
   assert.equal(result.result, 'result:real');
 });
 
+test('the fixed review toolset reaches the executor and other toolset values fail before execution', async () => {
+  let calls = 0;
+  const result = await runWorkflow(
+    `${header}
+const errors = []
+for (const toolset of ['full', '', null, 42, {}]) {
+  try { await agent('invalid', { toolset }) } catch (error) { errors.push(error.message) }
+}
+const value = await agent('valid', { toolset: 'review' })
+return { errors, value }`,
+    {
+      maxAgents: 1,
+      agent: {
+        async run(_prompt, options) {
+          calls++;
+          assert.equal(options.toolset, 'review');
+          return 'restricted';
+        }
+      }
+    }
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(plain(result.result), {
+    errors: Array(5).fill('agent toolset must be "review"'),
+    value: 'restricted'
+  });
+});
+
 test('tokenBudget feeds budget.total/remaining and stops agent() once spent', async () => {
   const executor: WorkflowAgentExecutor = {
     async run(_prompt, options) {

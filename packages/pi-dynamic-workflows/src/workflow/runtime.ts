@@ -163,6 +163,7 @@ export async function runWorkflow<T = unknown>(
           profile: profileName,
           schema: normalizedOptions.schema,
           isolation: normalizedOptions.isolation,
+          toolset: normalizedOptions.toolset,
           signal: options.signal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           route: profile,
@@ -369,6 +370,7 @@ function normalizeAgentOptions(value: unknown): AgentOptions {
     phase: optionalString(options.phase, 'agent phase'),
     profile: optionalProfileName(options.profile, 'agent profile'),
     isolation: normalizeIsolation(options.isolation),
+    toolset: normalizeToolset(options.toolset),
     agentType: optionalString(options.agentType, 'agent type')
   };
 }
@@ -391,6 +393,13 @@ function normalizeSchema(value: unknown): AgentOptions['schema'] {
     );
   }
   return value as AgentOptions['schema'];
+}
+
+function normalizeToolset(value: unknown): 'review' | undefined {
+  if (value !== undefined && value !== 'review') {
+    throw new TypeError('agent toolset must be "review"');
+  }
+  return value;
 }
 
 function normalizeIsolation(value: unknown): 'worktree' | undefined {

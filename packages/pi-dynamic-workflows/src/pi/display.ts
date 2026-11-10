@@ -1,6 +1,7 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { terminalLine } from '../shared/terminal-text.js';
 import type { WorkflowAgentStatus } from '../workflow/contracts.js';
+import { diagnosticText, workflowFailureSummary } from '../workflow/diagnostics.js';
 import type { WorkflowAgentSnapshot, WorkflowSnapshot } from '../workflow/snapshot.js';
 
 export interface WorkflowDisplay {
@@ -129,7 +130,17 @@ export function renderWorkflowLines(
     const running = agents.filter((agent) => agent.status === 'running').length;
     const errors = agents.filter((agent) => agent.status === 'error').length;
     const skipped = agents.filter((agent) => agent.status === 'skipped').length;
-    const complete = agents.length > 0 && done + errors + skipped === agents.length;
+    if (agents.length === 0) {
+      const marker =
+        snapshot.status === 'completed'
+          ? '✓'
+          : snapshot.status === 'failed' || snapshot.status === 'aborted'
+            ? '✗'
+            : '▶';
+      lines.push(`  ${marker} ${terminalLine(phase)} · code`);
+      continue;
+    }
+    const complete = done + errors + skipped === agents.length;
     const marker =
       running > 0 || (!complete && snapshot.currentPhase === phase) ? '▶' : complete ? '✓' : ' ';
     lines.push(
@@ -149,12 +160,18 @@ export function renderWorkflowLines(
       lines.push(agentLine(agent, showResultPreviews));
   }
 
+  if (snapshot.errorCount)
+    lines.push(...workflowFailureSummary(snapshot).map((line) => `  ${line}`));
   const visibleLogs = snapshot.logs.slice(-maxLogs);
   if (visibleLogs.length) {
     if (lines.length > 1) lines.push('');
-    for (const log of visibleLogs) lines.push(`  log: ${terminalLine(log)}`);
+    for (const log of visibleLogs) lines.push(`  log: ${diagnosticText(log, 500)}`);
   }
-  if ((options.showRunInfo ?? true) && snapshot.runId) lines.push(runInfoLine(snapshot));
+  if ((options.showRunInfo ?? true) && snapshot.runId) {
+    lines.push(runInfoLine(snapshot));
+    if (snapshot.status === 'completed')
+      lines.push(`  Report available: /workflows ${snapshot.runId} --report`);
+  }
   return lines;
 }
 

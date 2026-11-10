@@ -21,6 +21,8 @@ import type { WorkflowAgentRow } from '../durable/docs.js';
 import type { WorkflowHost } from '../durable/host.js';
 import {
   attemptRows,
+  attemptSnapshot,
+  savedAttemptReport,
   type WorkflowRunReport,
   type WorkflowTranscriptItem
 } from '../durable/report.js';
@@ -30,6 +32,7 @@ import {
   terminalInput,
   terminalMultiline
 } from '../shared/terminal-text.js';
+import { diagnosticText, workflowFailureSummary } from '../workflow/diagnostics.js';
 import { formatCost, formatDuration, formatTokens } from './display.js';
 import { resolveEditorCommand, viewInExternalEditor } from './external-editor.js';
 
@@ -59,9 +62,16 @@ export async function openWorkflowRuns(
   host: WorkflowHost,
   args = ''
 ): Promise<void> {
-  const runId = args.trim() || undefined;
+  const words = args.trim().split(/\s+/).filter(Boolean);
+  const reportOnly = words.at(-1) === '--report';
+  const runId = words[0];
+  const invalid = words.length > (reportOnly ? 2 : 1) || (reportOnly && words.length !== 2);
   if (ctx.mode !== 'tui') {
-    await printWorkflowRuns(pi, ctx, host, runId);
+    await printWorkflowRuns(pi, ctx, host, runId, reportOnly, invalid);
+    return;
+  }
+  if (invalid) {
+    ctx.ui.notify('Usage: /workflows [<run-id> [--report]]', 'error');
     return;
   }
   const result = await ctx.ui.custom<{ resume?: string } | undefined>(
@@ -74,7 +84,8 @@ export async function openWorkflowRuns(
         (value) => done(value),
         async (text, filename) =>
           viewInExternalEditor(tui, text, { command: resolveEditorCommand(ctx.cwd), filename }),
-        runId
+        runId,
+        reportOnly
       ),
     // Fullscreen mode handles the user's `tui.altScreen.*` scroll keys before the focused
     // component, except while an overlay has focus. Without the overlay they never reach the view.
@@ -97,7 +108,9 @@ async function printWorkflowRuns(
   pi: Pick<ExtensionAPI, 'sendMessage'>,
   ctx: ExtensionCommandContext,
   host: WorkflowHost,
-  runId: string | undefined
+  runId: string | undefined,
+  reportOnly = false,
+  invalid = false
 ): Promise<void> {
   const output = (text: string, type: 'info' | 'error') => {
     const safeText = terminalMultiline(text);
@@ -121,6 +134,7 @@ async function printWorkflowRuns(
     }
   };
   try {
+    if (invalid) throw new Error('Usage: /workflows [<run-id> [--report]]');
     if (!runId) {
       const runs = host.list();
       output(
@@ -136,7 +150,9 @@ async function printWorkflowRuns(
     }
     const report = await host.report(runId);
     output(
-      renderRunDetailLines(report, report.attempts.length - 1, -1, Date.now()).join('\n'),
+      reportOnly
+        ? savedAttemptReport(report.attempts.at(-1))
+        : renderRunDetailLines(report, report.attempts.length - 1, -1, Date.now()).join('\n'),
       'info'
     );
   } catch (error) {
@@ -152,6 +168,14 @@ type BrowserMode =
       report?: WorkflowRunReport;
       attempt: number;
       selected: number;
+    }
+  | {
+      kind: 'report';
+      runId: string;
+      title: string;
+      text: string;
+      offset: number;
+      back: Extract<BrowserMode, { kind: 'detail' }>;
     }
   | {
       kind: 'transcript';
@@ -191,10 +215,11 @@ export class WorkflowRunsBrowser implements Focusable {
     private readonly host: WorkflowHost,
     private readonly done: (result: { resume?: string } | undefined) => void,
     private readonly viewInEditor: (text: string, filename: string) => Promise<void>,
-    initialRunId?: string
+    initialRunId?: string,
+    reportOnly = false
   ) {
     this.#mode = { kind: 'list', runs: host.list(), selected: 0 };
-    if (initialRunId) this.#openDetail(initialRunId);
+    if (initialRunId) this.#openDetail(initialRunId, undefined, reportOnly);
   }
 
   get focused(): boolean {
@@ -221,15 +246,21 @@ export class WorkflowRunsBrowser implements Focusable {
     const mode = this.#mode;
     if (mode.kind === 'list') this.#listInput(mode, data);
     else if (mode.kind === 'detail') this.#detailInput(mode, data);
+    else if (mode.kind === 'report') this.#reportInput(mode, data);
     else this.#transcriptInput(mode, data);
   }
 
   /** Fullscreen mode delivers wheel events; regular mode leaves them to the terminal. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     const mode = this.#mode;
-    if (event.type !== 'wheel' || !event.wheelDelta || mode.kind !== 'transcript' || this.#editing)
+    if (
+      event.type !== 'wheel' ||
+      !event.wheelDelta ||
+      (mode.kind !== 'transcript' && mode.kind !== 'report') ||
+      this.#editing
+    )
       return undefined;
-    if (mode.live && event.wheelDelta < 0) mode.live.pinned = false;
+    if (mode.kind === 'transcript' && mode.live && event.wheelDelta < 0) mode.live.pinned = false;
     mode.offset = Math.max(0, mode.offset + event.wheelDelta);
     this.#refresh();
     return { handled: true };
@@ -285,7 +316,7 @@ export class WorkflowRunsBrowser implements Focusable {
         ? `${mode.runs.length} run(s)`
         : mode.kind === 'detail'
           ? mode.runId
-          : `${mode.runId} · ${mode.title}${mode.live ? (mode.live.paused ? ' · ⏸ paused' : mode.live.busy ? ' · ● live' : ' · finished') : ''}`;
+          : `${mode.runId} · ${mode.title}${mode.kind === 'transcript' && mode.live ? (mode.live.paused ? ' · ⏸ paused' : mode.live.busy ? ' · ● live' : ' · finished') : ''}`;
     return `${this.theme.fg('accent', ` ${this.theme.bold('/workflows')}`)}${this.theme.fg('muted', ` · ${sanitize(label)}`)}`;
   }
 
@@ -294,7 +325,7 @@ export class WorkflowRunsBrowser implements Focusable {
       case 'list':
         return ' ↑/↓ move • Enter inspect • r resume • a abort • d delete • g refresh • q/Esc close';
       case 'detail':
-        return ' ↑/↓ agent • Enter transcript • x cancel agent • [/] attempt • r resume • a abort • g refresh • Esc back';
+        return ' v report • ↑/↓ agent • Enter transcript • x cancel agent • [/] attempt • r resume • a abort • g refresh • Esc back';
       default:
         return this.#transcriptHelp();
     }
@@ -358,6 +389,11 @@ export class WorkflowRunsBrowser implements Focusable {
       return [...header, ...sections.agents.slice(start, start + listHeight), ...details].map(
         (line) => (line.startsWith('>') ? this.theme.fg('accent', line) : line)
       );
+    }
+    if (mode.kind === 'report') {
+      const lines = mode.text.split('\n').flatMap((line) => wrapTextWithAnsi(line, width));
+      mode.offset = Math.max(0, Math.min(mode.offset, Math.max(0, lines.length - height)));
+      return lines.slice(mode.offset, mode.offset + height);
     }
     if (!mode.items) return [this.theme.fg('muted', '  Loading…')];
     const { lines, prompts } = transcriptLayout(mode.items, width);
@@ -443,6 +479,10 @@ export class WorkflowRunsBrowser implements Focusable {
       this.#refresh();
       return;
     }
+    if (matchesKey(data, 'v')) {
+      this.#openReport(mode);
+      return;
+    }
     if (matchesKey(data, 'g')) {
       this.#openDetail(mode.runId, mode);
       return;
@@ -489,6 +529,42 @@ export class WorkflowRunsBrowser implements Focusable {
       if (transcript.live) this.#follow(transcript);
       else this.#loadTranscript(transcript);
     }
+  }
+
+  #openReport(detail: Extract<BrowserMode, { kind: 'detail' }>): void {
+    const attempt = detail.report?.attempts[detail.attempt];
+    let text = savedAttemptReport(attempt);
+    if (attempt && detail.report && attempt.status !== 'completed') {
+      text += `\n\n${workflowFailureSummary(attemptSnapshot(detail.report.run, attempt, Date.now()), attempt.error).join('\n\n')}`;
+    }
+    this.#mode = {
+      kind: 'report',
+      runId: detail.runId,
+      title: `Attempt ${attempt?.number ?? '?'} report`,
+      text,
+      offset: 0,
+      back: detail
+    };
+    this.#message = undefined;
+    this.#refresh();
+  }
+
+  #reportInput(mode: Extract<BrowserMode, { kind: 'report' }>, data: string): void {
+    if (matchesKey(data, Key.escape) || matchesKey(data, 'q')) {
+      this.#mode = mode.back;
+      this.#message = undefined;
+      this.#refresh();
+      return;
+    }
+    if (matchesKey(data, 'e')) {
+      void this.#openInEditor(mode);
+      return;
+    }
+    const scroll = this.#scrollRequest(data);
+    if (scroll === 'top') mode.offset = 0;
+    else if (scroll === 'bottom') mode.offset = Number.MAX_SAFE_INTEGER;
+    else if (scroll && !scroll.prompt) mode.offset = Math.max(0, mode.offset + scroll.lines);
+    this.#refresh();
   }
 
   #loadTranscript(transcript: Extract<BrowserMode, { kind: 'transcript' }>): void {
@@ -710,17 +786,21 @@ export class WorkflowRunsBrowser implements Focusable {
     }
   }
 
-  /** The whole transcript, unwrapped and untruncated, in the user's editor. */
-  async #openInEditor(mode: Extract<BrowserMode, { kind: 'transcript' }>): Promise<void> {
-    if (!mode.items) {
+  /** The selected read-only text, unwrapped and untruncated, in the user's editor. */
+  async #openInEditor(
+    mode: Extract<BrowserMode, { kind: 'transcript' | 'report' }>
+  ): Promise<void> {
+    if (mode.kind === 'transcript' && !mode.items) {
       this.#notify('The transcript is still loading.');
       return;
     }
     this.#editing = true;
     try {
       await this.viewInEditor(
-        renderTranscriptText(`${mode.runId} · ${mode.title}`, mode.items),
-        `${mode.runId}-transcript.md`
+        mode.kind === 'report'
+          ? mode.text
+          : renderTranscriptText(`${mode.runId} · ${mode.title}`, mode.items ?? []),
+        `${mode.runId}-${mode.kind}.md`
       );
       this.#message = undefined;
       this.#refresh();
@@ -731,7 +811,11 @@ export class WorkflowRunsBrowser implements Focusable {
     }
   }
 
-  #openDetail(runId: string, previous?: Extract<BrowserMode, { kind: 'detail' }>): void {
+  #openDetail(
+    runId: string,
+    previous?: Extract<BrowserMode, { kind: 'detail' }>,
+    reportOnly = false
+  ): void {
     const detail: Extract<BrowserMode, { kind: 'detail' }> = {
       kind: 'detail',
       runId,
@@ -747,6 +831,7 @@ export class WorkflowRunsBrowser implements Focusable {
         detail.report = report;
         if (detail.attempt < 0 || detail.attempt >= report.attempts.length)
           detail.attempt = report.attempts.length - 1;
+        if (reportOnly && this.#mode === detail) this.#openReport(detail);
         this.#refresh();
       })
       .catch((error) => this.#notify(errorText(error), 'error'));
@@ -816,10 +901,25 @@ function runDetailSections(
   const rows = attemptRows(attempt);
   lines.push(
     '',
-    ` Attempt ${attempt.number}/${report.attempts.length} · ${attempt.status} · ${formatDuration((attempt.endedAt ?? now) - attempt.startedAt)}${attempt.error ? ` · ${sanitize(oneLine(attempt.error))}` : ''}`
+    ` Attempt ${attempt.number}/${report.attempts.length} · ${attempt.status} · ${formatDuration((attempt.endedAt ?? now) - attempt.startedAt)}`
   );
+  if (attempt.status === 'completed')
+    lines.push(
+      `   Report available: /workflows ${report.runId} --report (v opens selected attempt)`
+    );
+  if (
+    rows.some((row) => row.status === 'error') ||
+    attempt.status === 'failed' ||
+    attempt.status === 'aborted'
+  ) {
+    lines.push(
+      ...workflowFailureSummary(attemptSnapshot(report.run, attempt, now), attempt.error).map(
+        (line) => `   ${line}`
+      )
+    );
+  }
   if (attempt.logs.length)
-    lines.push(`   last log: ${sanitize(oneLine(attempt.logs.at(-1) ?? ''))}`);
+    lines.push(`   last log: ${diagnosticText(oneLine(attempt.logs.at(-1) ?? ''))}`);
   lines.push('');
   const agents: string[] = [];
   let phase: string | undefined;
@@ -847,7 +947,7 @@ function runDetailSections(
     }
     details.push(`   prompt ${sanitize(oneLine(current.prompt)).slice(0, 400)}`);
     if (current.preview) details.push(`   result ${sanitize(oneLine(current.preview))}`);
-    if (current.error) details.push(`   error ${sanitize(oneLine(current.error))}`);
+    if (current.error) details.push(`   error ${diagnosticText(oneLine(current.error))}`);
     const compactionFailure =
       current.conversationId === undefined
         ? undefined

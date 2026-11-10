@@ -11,7 +11,7 @@ export interface WorkflowProfile {
   thinkingLevel: ThinkingLevel;
   /**
    * Omitted means enabled. `false` keeps the profile on disk, but `loadWorkflowProfiles` skips it.
-   * The resolver and the workflow tool trust the profiles they receive.
+   * The resolver also rejects explicitly disabled entries supplied by embedding hosts.
    */
   enabled?: boolean;
 }
@@ -41,7 +41,10 @@ export interface WorkflowProfileResolverContext {
   }[];
 }
 
-export type WorkflowProfileResolver = (name: string) => ResolvedWorkflowProfile;
+export type WorkflowProfileResolver = (
+  name: string,
+  pinned?: ResolvedWorkflowProfile
+) => ResolvedWorkflowProfile;
 
 export class WorkflowProfileRoutingError extends Error {
   constructor(profileName: string, reason: string) {

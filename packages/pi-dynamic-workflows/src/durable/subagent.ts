@@ -19,6 +19,10 @@ import {
 import { createReadTool } from '@earendil-works/pi-durable/tools';
 import type { TSchema } from 'typebox';
 import {
+  reviewOutputContract,
+  validateReviewOutput
+} from '../workflow/builtins/code-review-output.js';
+import {
   WorkflowOutputDoc,
   WorkflowPromptContextDoc,
   type WorkflowPromptContextState
@@ -44,14 +48,27 @@ const RULES = [
 ];
 
 /** Pi-style system prompt for workflow subagents, rendered from the run's captured context. */
-export function createSubagentExtension(): Extension {
+export function createSubagentExtension(toolset?: 'review'): Extension {
   const context = (input: PromptInput, ctx: Context) =>
     input.read.snapshot(WorkflowPromptContextDoc, ctx);
   return defineExtension({
-    name: SUBAGENT_EXTENSION_NAME,
+    name: toolset === 'review' ? 'workflow.review_subagent' : SUBAGENT_EXTENSION_NAME,
     sections: [
       section('preamble', () => PREAMBLE, { tag: false }),
-      section('rules', () => RULES.map((rule) => `- ${rule}`).join('\n')),
+      section('rules', () =>
+        (toolset === 'review'
+          ? [
+              'Follow the task-specific investigation procedure. Use ls and find when discovery is needed, grep to search contents, read for focused line ranges, and git_inspect for history',
+              'Review tools are restricted by the application. Editing, arbitrary commands, tests/builds, MCP, and third-party tools are unavailable',
+              'This is static inspection, not an OS sandbox. File contents are live and may change',
+              'Resolve truncated results before relying on missing portions. Report material unresolved evidence gaps or truncation. Do not claim complete coverage',
+              ...RULES.slice(3)
+            ]
+          : RULES
+        )
+          .map((rule) => `- ${rule}`)
+          .join('\n')
+      ),
       section('addendum', async (input, ctx) => (await context(input, ctx))?.append || undefined),
       section('project_context', async (input, ctx) => {
         const files = (await context(input, ctx))?.contextFiles ?? [];
@@ -107,6 +124,8 @@ export function createOutputExtension(schema: TSchema): Extension {
         // Idempotent: a rerun after a crash writes the same value again.
         replay: 'safe',
         execute: async (args, api, context) => {
+          const contract = reviewOutputContract(schema);
+          if (contract) validateReviewOutput(args, contract);
           await api.commit(async (tx) => {
             const output = await tx.doc(WorkflowOutputDoc, api.conversationId);
             output.set = true;

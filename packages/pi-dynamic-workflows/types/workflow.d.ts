@@ -41,6 +41,8 @@ declare global {
     profile?: string;
     /** Use a retained Git worktree based on HEAD. Not a filesystem security boundary. */
     isolation?: 'worktree';
+    /** Use the fixed read-only review tools. No editing, arbitrary execution, or extra extensions. Not an OS sandbox. */
+    toolset?: 'review';
     /** Requested subagent role/type. */
     agentType?: string;
   }

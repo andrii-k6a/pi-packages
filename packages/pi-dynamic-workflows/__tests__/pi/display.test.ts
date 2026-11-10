@@ -68,8 +68,28 @@ test('renderWorkflowLines keeps the current empty phase visible', () => {
     })
   );
 
-  assert.ok(lines.some((line) => line.includes('▶ Scan 0/0')));
+  assert.ok(lines.some((line) => line.includes('▶ Scan · code')));
+  assert.ok(!lines.some((line) => line.includes('Scan 0/0')));
 });
+
+test.each([
+  ['completed', '✓'],
+  ['failed', '✗']
+] as const)(
+  'code-only phases show the terminal %s status, not an empty agent counter',
+  (status, marker) => {
+    const lines = renderWorkflowLines(
+      snapshot({
+        phases: ['Scan', 'Report'],
+        currentPhase: 'Report',
+        agents: [agent()],
+        status
+      })
+    );
+    assert.ok(lines.some((line) => line.includes(`${marker} Report · code`)));
+    assert.ok(!lines.some((line) => line.includes('Report 0/0') || line.includes('▶ Report')));
+  }
+);
 
 test('renderWorkflowLines groups agents by phase even when the phase was not pre-recorded', () => {
   const lines = renderWorkflowLines(

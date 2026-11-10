@@ -17,6 +17,14 @@ export interface WorkflowMeta {
 }
 
 /** Domain statuses shared by durable records, listing summaries, and display projections. */
+export type WorkflowFailureKind =
+  | 'authentication'
+  | 'quota'
+  | 'transient'
+  | 'invalid-output'
+  | 'cancellation'
+  | 'unknown';
+
 export type WorkflowAgentStatus = 'queued' | 'running' | 'done' | 'error' | 'skipped';
 export type WorkflowAttemptStatus = 'running' | 'completed' | 'failed' | 'aborted';
 /** Interrupted is an observed run state, not a committed attempt outcome. */
@@ -41,6 +49,8 @@ export interface WorkflowAgentRunOptions {
   route?: ResolvedWorkflowProfile;
   /** Run in a retained Git worktree when executed by WorkflowHost. */
   isolation?: 'worktree';
+  /** Fixed inspection-only tool selection, enforced by the durable executor. */
+  toolset?: 'review';
   /** Report spend, including spend of a failed run. */
   onUsage?: (usage: Usage) => void;
 }
@@ -98,5 +108,7 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   profile?: string;
   /** Use a retained Git worktree based on HEAD. Not a filesystem security boundary. */
   isolation?: 'worktree';
+  /** Fixed inspection-only tool selection. Not an OS sandbox. */
+  toolset?: 'review';
   agentType?: string;
 }

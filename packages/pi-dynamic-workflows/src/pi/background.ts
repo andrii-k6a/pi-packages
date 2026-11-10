@@ -11,6 +11,7 @@ import type {
 } from '../durable/host.js';
 import { attemptSnapshot } from '../durable/report.js';
 import { terminalLine } from '../shared/terminal-text.js';
+import { workflowFailureSummary } from '../workflow/diagnostics.js';
 import {
   compactSnapshot,
   createWorkflowSnapshot,
@@ -82,9 +83,11 @@ export class WorkflowBackgroundRuns {
       run.snapshot = compactSnapshot(snapshot);
       if (this.#closed || !ctx.hasUI) return;
       const progress = `◆ ${terminalLine(snapshot.name)}: ${snapshot.doneCount}/${snapshot.agentCount} done${snapshot.currentPhase ? ` · ${terminalLine(snapshot.currentPhase)}` : ''} · ${handle.runId}`;
-      if (progress === lastProgress) return;
-      lastProgress = progress;
-      ctx.ui.setWidget(widgetKey(handle.runId), [progress]);
+      const lines = [progress, ...(snapshot.errorCount ? workflowFailureSummary(snapshot) : [])];
+      const picture = lines.join('\n');
+      if (picture === lastProgress) return;
+      lastProgress = picture;
+      ctx.ui.setWidget(widgetKey(handle.runId), lines);
     });
     run.finished = this.#finish(run, ctx);
   }
@@ -148,8 +151,8 @@ export class WorkflowBackgroundRuns {
     const content = [
       `Background workflow ${terminalLine(snapshot.name)} ${status} (run ${runId}, attempt ${snapshot.attempt}).`,
       status === 'completed'
-        ? `Call workflow with ${JSON.stringify({ result: runId })} to retrieve the result and record its usage. Do not resume or rerun it.`
-        : `${error ? `${terminalLine(error)}. ` : ''}Committed work is saved. Inspect with workflow ${JSON.stringify({ status: runId })}. Resume only when requested, with ${JSON.stringify({ resume: runId, background: true })}.`
+        ? `Report available: /workflows ${runId} --report. Call workflow with ${JSON.stringify({ result: runId })} to retrieve the result and record its usage. Do not resume or rerun it.`
+        : workflowFailureSummary(snapshot, error).join('\n')
     ].join('\n');
     const deliveryId = randomUUID();
     const notification: PendingNotification = {
