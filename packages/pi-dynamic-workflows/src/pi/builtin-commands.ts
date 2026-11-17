@@ -1,7 +1,9 @@
-import { type ExtensionAPI, SessionManager } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { terminalLine } from '../shared/terminal-text.js';
 import { resolveBuiltinWorkflow } from '../workflow/builtins.js';
 import { parseCodeReviewCommand, prepareCodeReviewInput } from './code-review-input.js';
+import { persistWorkflowCommand } from './command-session.js';
+import { registerSdlcCommand } from './sdlc-command.js';
 import { createWorkflowRunBinding, type WorkflowToolOptions } from './workflow-tool.js';
 
 export function registerBuiltinWorkflowCommands(
@@ -63,30 +65,7 @@ export function registerBuiltinWorkflowCommands(
         }
         const workflowArgs = input.args;
         const script = resolveBuiltinWorkflow('code-review', workflowArgs);
-        const parent = ctx.sessionManager;
-        if (
-          parent.getSessionFile() &&
-          !parent
-            .getEntries()
-            .some(
-              (entry) =>
-                entry.type === 'message' &&
-                (entry.message.role === 'user' || entry.message.role === 'assistant')
-            )
-        ) {
-          // Pi keeps custom entries in memory until a user or assistant message exists.
-          // Record the command without starting a parent turn so ownership can persist on launch.
-          if (!(parent instanceof SessionManager)) {
-            throw new Error(
-              'Code review requires Pi SessionManager to persist the command before launch'
-            );
-          }
-          parent.appendMessage({
-            role: 'user',
-            content: `/code-review${args.trim() ? ` ${args.trim()}` : ''}`,
-            timestamp: Date.now()
-          });
-        }
+        persistWorkflowCommand(ctx, `/code-review${args.trim() ? ` ${args.trim()}` : ''}`);
         const handle = await options.host.start(
           { script, args: workflowArgs, cwd: input.cwd },
           binding
@@ -117,4 +96,5 @@ export function registerBuiltinWorkflowCommands(
       }
     }
   });
+  registerSdlcCommand(pi, options);
 }

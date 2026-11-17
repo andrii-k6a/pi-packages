@@ -5,6 +5,46 @@ export type ReviewOutputContract = {
   earlierIds?: string[];
 };
 
+export function createReviewFindingProperties() {
+  const text = (maxLength: number, minLength = 1) => ({
+    type: 'string',
+    minLength,
+    maxLength,
+    ...(minLength ? { pattern: '\\S' } : {})
+  });
+  const location = {
+    file: text(500),
+    line: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
+  };
+  return {
+    ...location,
+    summary: text(240),
+    evidence: text(1000),
+    priority: { type: 'integer', minimum: 1, maximum: 3 },
+    scenario: {
+      ...text(800),
+      description:
+        'Reachable trigger and wrong result, or present architectural consequence or maintenance burden.'
+    },
+    alternative: {
+      ...text(600, 0),
+      description:
+        'Proportionate behavior-preserving alternative. May be empty for behavioral findings.'
+    },
+    references: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 5,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { ...location, observation: text(400) },
+        required: ['file', 'line', 'observation']
+      }
+    }
+  };
+}
+
 /** Self-contained so the built-in script and durable structured_output use the same checks. */
 export function createReviewOutputChecks(fileMode: boolean, cwd: string) {
   function normalizedPath(value: string): string {

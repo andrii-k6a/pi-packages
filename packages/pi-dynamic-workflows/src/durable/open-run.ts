@@ -33,6 +33,7 @@ export type OpenRun = {
   /** Live reads of finished agents, by conversation, so polling does not repeat them. */
   liveCache: Map<number, { entry: LiveEntry; readAt: number }>;
   usageDelivery?: UsageDestination;
+  sdlcWorkspaceLease?: () => void;
   offer?: Promise<UsageOffer>;
   close(discard?: boolean): Promise<void>;
 };
@@ -84,7 +85,11 @@ export function ownOpenRun(resources: OpenRunResources, callbacks: OwnershipCall
           try {
             if (discard) callbacks.discard();
           } finally {
-            callbacks.release();
+            try {
+              open.sdlcWorkspaceLease?.();
+            } finally {
+              callbacks.release();
+            }
           }
         }
       })().finally(unsubscribeClose);

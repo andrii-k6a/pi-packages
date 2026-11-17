@@ -2,7 +2,7 @@
 
 > Claude-Code-style dynamic workflows for [Pi](https://github.com/earendil-works/pi).
 
-A Pi extension that adds a `workflow` tool. Instead of one assistant doing everything sequentially, the model writes a small JavaScript script that fans out the work across many subagents with separate conversation contexts, then synthesizes the results. Subagents share the run's working directory by default. Editing agents can use [Git worktree isolation](#git-worktree-isolation). Neither mode restricts filesystem access.
+A Pi extension with a `workflow` tool, adaptive `/sdlc` implementation, and standalone `/code-review`. Give SDLC a goal, or write a small JavaScript workflow with separate subagent contexts. Custom-script agents share the run directory unless you select [Git worktree isolation](#git-worktree-isolation). SDLC manages its selected target and worker integration. Neither mode restricts filesystem access.
 
 Great for codebase audits, multi-perspective review, large refactors, and fan-out research.
 
@@ -48,6 +48,90 @@ The model can write a workflow script or select a built-in, then call the `workf
 Rows also show duration, tokens, the model/profile in use, and what each running subagent is doing right now (for example `bash: npm test`, `thinking`, or `retrying (attempt 2): 429`). Extensions that call other tools show the nested work, such as `codemode → bash: 3 passed`, rather than just the orchestrator. Unresolved compaction failures appear as warnings, including after the agent finishes. The footer shows the run id, attempt, elapsed time, and spend.
 
 Press `Esc` to cancel a foreground workflow. Active subagents are aborted bottom-up and surfaced as skipped, **completed results are kept**, and the error names the run id so the model (or you) can resume it. To follow, steer, or stop a single agent instead, use [`/workflows`](#workflows).
+
+### Adaptive SDLC
+
+Give `sdlc` a goal to implement, check, and independently review in one durable operation:
+
+```text
+/sdlc Fix pagination so the client loads every page without losing item order
+/sdlc --background {"goal":"Fix cache misses","acceptance":["Falsy cache hits are preserved"]}
+```
+
+The command waits by default. `--background` returns immediately. Both use the existing result-ready delivery path, so the main agent retrieves the stored result and usage through `workflow`. Work stays in the Pi process, not a daemon. The `workflow` tool also defaults to foreground:
+
+```json
+{
+  "name": "sdlc",
+  "args": {
+    "goal": "Fix cache misses without breaking falsy hits",
+    "context": ["src/cache.ts", "acceptance/cache.test.ts"],
+    "constraints": ["Do not change the public API"],
+    "acceptance": [
+      {"id":"cache-behavior","description":"Preserve falsy hits and store computed misses","checkIds":["tests"]}
+    ],
+    "checks": [
+      {"id":"tests","argv":["npm","test","--","cache"],"kind":"test","outcomes":["goal","cache-behavior"]}
+    ]
+  }
+}
+```
+
+`goal` is required. `context` accepts text or a list of text/file references. `constraints` is a list. `acceptance` accepts descriptions or objects with `id`, `description`, `verification` (`behavioral` by default or `inspection`), and `checkIds`. Checks use an explicit argv array, optional relative `cwd`, kind `test` or `check`, and the outcome IDs they verify. The original goal remains an obligation even when explicit criteria are supplied. Provide meaningful commands: missing, failed, unavailable, or empty checks cannot establish behavioral acceptance. When `checks` is omitted, SDLC looks only for a real `scripts.test` in the target's `package.json` and uses `npm test` (adding `-- --run` for Vitest or `-- --runInBand --watch=false` for Jest) as check `repository-tests` for outcome `goal`. The independent reviewer can associate a configured or discovered check with another outcome through `outcomes[].checkIds`. The reviewer must inspect the check, explain its coverage, and cite fresh passing evidence. This permits verification of string acceptance criteria without treating a passing suite as proof of every outcome. A discovered command shows that a check exists, not that it passed. Pass `checks: []` to disable discovery, which leaves behavioral outcomes without command evidence. A test command that reports zero or an unrecognized test count is `empty` or `unknown`, never a pass.
+
+Ordinary starts try one implementer rather than a mandatory analyst. Before editing, that implementer can return a structured handoff with material questions or a dependency plan. Questions persist and block only dependent work. A complete small brief needs no such handoff. `planning: "investigate"` explicitly selects bounded inspection/planning first.
+
+**Context and research.** Research is selective, not a mandatory phase. A named `unresolvedDecisions` entry, an explicit `planning: "investigate"`, or an implementer handoff can start one bounded analyst task with a named question, a local scope, and a stop condition. The packaged analyst has inspection tools only (`read`, `ls`, `find`, `grep`, `git_inspect`). It cannot edit files or run arbitrary commands. The Pi extension admits no external research tool, so web or service research is unavailable by default. The analyst must report that as a limitation rather than invent evidence. An embedding host can admit a research tool with `roles.researchTools`, and an analyst-stage role variant must then list that exact tool name. Admission does not establish evidence quality. Each worker receives the relevant brief, dependency outputs, and evidence references with a compact manifest, never the parent transcript or sibling transcripts. Temporary notes and artifacts have stable IDs and content revisions in the run's durable storage. Lasting decisions and user documentation belong in repository files only when the goal requires them.
+
+Use a literal goal or one JSON args object after `/sdlc`, not shell-quoted JSON. Use `/sdlc -- <goal>` when goal text starts with a command keyword. Unknown fields fail rather than being ignored. Advanced inputs include `planning: "investigate"`, an explicit dependency `plan`, durable `questions`, and structured review `evidence: [{"kind":"code-review","runId":"…","attempt":1}]`. Review references require an explicit source attempt. Findings are historical claims until checked against the candidate, not instructions reconstructed from Markdown.
+
+**Workspace.** Foreground starts default to `workspace: {"mode":"existing"}`. Background starts default to `{"mode":"isolated"}`. Select `workspace.cwd` to target another directory, or set a mode explicitly. Serial work evolves one target. Independent writers use separate checkouts and integrate automatically into that target in recorded order. Isolated results stay in the operation-owned checkout under the Git common directory's `pi-sdlc-worktrees/`, not silently applied to the original source. Git-backed workspaces require a repository with an initial commit in either mode. Isolation and concurrent-writer integration require Git. Existing-directory serial work can also use non-Git directories. Worktrees and write ownership are not an OS sandbox.
+
+SDLC captures supported staged and unstaged contents plus eligible non-ignored untracked files using a temporary index. It preserves the source checkout and staged state during isolated setup, and preserves the target index during integration. It does not duplicate already committed branch changes through a merge-base patch. Ignored dependencies and build output are not copied. Install required dependencies in the target explicitly. Unsupported forms fail before implementation: unmerged indexes, submodule gitlinks, sparse checkouts, assume-unchanged entries, and skip-worktree entries in Git repositories, and non-Git directory trees with more than 50,000 entries. Task file-identity capture also rejects non-regular inputs (including symlinks), files over 32 MiB, and listings over 50,000 entries. Target drift or unsafe integration stops with retained changes and recovery diagnostics. Workspace leases are acquired before recovery schedules child work and retained until the run handle closes. They do not exclude unrelated editors or shell commands. SDLC currently requires a local `NodeExecutionEnv` and rejects nonlocal execution without fallback.
+
+**Destination announcement.** The adapters announce policy before opening work: an existing target's canonical path, or that an operation-owned checkout was selected. The host then plans the workspace and records its intent durably. After that, but before it schedules any task or creates the checkout, it calls `WorkflowRunBinding.onWorkspaceSelected` with the exact recorded destination. Start, in-place or retried `resume`, and `continue` all announce. The `/sdlc` command shows a notice. The `workflow` tool sends a progress update. For an isolated start the notice names the operation-owned path under `<Git common dir>/pi-sdlc-worktrees/` and its `pi/sdlc/…` branch. On a new start that checkout does not exist yet when announced. It is never the source checkout. If the call is cancelled while the callback runs, the attempt is aborted before workspace execution. A binding without the callback gets no announcement. `status` and the result still report the recorded workspace.
+
+**Questions and continuation.** Missing answers remain unanswered, including in RPC or after restart. Answer delivery does not start more work:
+
+```text
+/sdlc status <run-id>
+/sdlc answer <run-id> {"questionId":"direction","briefRevision":1,"answer":"ascending"}
+/sdlc continue <run-id>
+/sdlc --background continue <run-id> {"limits":{"maxTasks":40}}
+/sdlc continue <run-id> {"checks":[{"id":"behavior","argv":["npm","test","--","--run"],"kind":"test","outcomes":["goal"]}]}
+/sdlc cancel <run-id>
+```
+
+Equivalent tool requests are `{ "answer": {"runId":"…","questionId":"direction","briefRevision":1,"answer":"ascending"} }` and `{ "continue":"…", "continueOptions":{"limits":{"maxTasks":40}} }`. Answers require the question's recorded brief revision. Stale or duplicate answers fail. `answer` is exclusive. `continue` accepts only `continueOptions` and optional `background`. Continuation preserves operation identity, evidence, pinned roles, and accumulated spend. `resume` is for runtime recovery. Once an attempt completed, `resume` only retrieves its stored result, even if the product outcome needs more work. An authorized goal change uses continuation with the current `goalRevision`, revised `goal`, and any replacement criteria. To supply missing observable evidence without changing the goal, add `continueOptions.checks`. Checks are additive by ID. An identical existing check is allowed, but replacing or weakening one is rejected. Include the applicable outcome IDs. Adding checks invalidates independent review so the updated evidence is assessed again. Continuation requires a settled runtime attempt. Answering or continuing live/interrupted work is rejected: resume or cancel it first.
+
+**Representative paths.** Each path uses the same operation, checks, and independent review:
+
+- *Small task:* a complete brief such as the first `/sdlc` example starts one implementer with no analyst, plan, or question.
+- *Ambiguous task:* supply `questions` (for example `{"id":"direction","text":"Ascending or descending?","affectedTasks":[]}`), or let the implementer return material questions before editing. The outcome is `needs-input`, the answer is recorded with `/sdlc answer`, and `/sdlc continue` schedules only the clarified work.
+- *Independent work:* an implementer (or a supplied `plan`) can split a goal into tasks with disjoint literal `writes`, for example `{"plan":{"reason":"Independent files","tasks":[{"id":"left","title":"Write left","outcome":"Create left.txt","dependsOn":[],"writes":["left.txt"],"inputs":[],"checks":[],"questionIds":[]},{"id":"right","title":"Write right","outcome":"Create right.txt","dependsOn":[],"writes":["right.txt"],"inputs":[],"checks":[],"questionIds":[]}]}}`. Tasks with overlapping writes, cycles, or missing dependencies are rejected before any effect. Concurrent writers use separate checkouts. Their outputs integrate into the selected target, and checks and review run on the assembled result. Integration alone is not acceptance.
+- *Imported review:* run `/code-review --files src`, then start SDLC with `{"goal":"Fix the confirmed cache issue","evidence":[{"kind":"code-review","runId":"<review-run-id>","attempt":1}]}`. The structured findings and their separate spend are imported as historical claims. Candidate acceptance still needs fresh checks and independent review.
+- *Review passes but behavior is missing:* clean code review and passing tests do not accept a goal. The independent assessment marks each required outcome `met`, `not-met`, or `unverified`. A `not-met` outcome creates a correction task in the same operation while correction rounds remain, then invalidates and reruns affected checks and review. An `unverified` outcome with a configured relevant check gets one bounded verification pass. Otherwise the operation stays `incomplete` until you continue with additional authorized `checks`. Repeated candidates, repeated causes, or oscillation stop instead of looping.
+
+Findings discovered during an operation retain review-qualified IDs across corrections and continuation. Omitting a finding does not close it. Resolution or refutation requires current source evidence. A reviewer can defer an unrelated, pre-existing operation finding with supporting source observations. Deferral remains conservative: the finding and its supporting locations must be in files the operation did not change. Defects in changed files remain blocking. Deferred dispositions stay in the result and saved review history. Invalidating closure evidence reopens the claim for review.
+
+Inspection includes activity, actual workspace, pending question IDs/revisions, limits, and cumulative usage. `/workflows <run-id> --report` opens the saved result without a model turn. Runtime completion is separate from product acceptance:
+
+| Outcome | Meaning |
+| --- | --- |
+| `accepted` | The assembled candidate meets the goal obligations and acceptance policy, with independent review. Retrieve the result. Use an authorized goal revision for changed scope. |
+| `no-work` | The caller explicitly confirmed an empty scope with `noWork: {"confirmed":true,"reason":"…"}`. No dummy agent is needed. An authorized goal revision removes that assertion. |
+| `needs-input` | A material decision is unanswered. Record an answer, then continue. |
+| `blocked` | A capability, workspace, or execution problem prevents progress. Resolve it before continuation. |
+| `incomplete` | Required work/evidence remains, or a convergence/allowance limit stopped work. Inspect unresolved work and deliberately extend limits if appropriate. |
+| `cancelled` | The controller recorded cancellation. Runtime abort may instead report `aborted` with retained work. Inspect the runtime state before choosing resume or continuation. |
+
+Default operation policies are 24 tasks, 3 correction rounds, 2 replans, concurrency 2, 15 minutes per task, 5 minutes per check, and 500,000 tokens. Set `policy.limits` to override them before starting. Token allowance is soft: in-flight work can overshoot. Continuation changes are recorded, not silent allowance resets. `policy.contextTarget` defaults to 0.5 as a planning heuristic, not measured context occupancy. `policy.contextWindowTokens` supplies the usable-window estimate (default 128,000 tokens), including instructions, tools, anticipated output, and response headroom. Cumulative billed tokens are not context occupancy. `policy.profile`, `policy.phaseProfiles`, and `policy.roles` select approved routing and role variants. Defining a profile alone changes no default.
+
+Check logs remain in durable evidence and selectively readable cache files. Reviewer prompts contain compact check summaries, not full logs. Context estimates include the assembled prompt, role instructions, output schema, and reserved headroom. Inputs estimated to exceed the configured usable window stop as `incomplete` before generation.
+
+Artifacts, questions, evidence, and worker checkouts are retained across interruptions and continuation. There is no automatic pruning. Do not remove checkouts or evidence needed by unfinished work. Deleting a run removes its run storage, not a promise to safely prune all Git branches. Inspect and clean integrated worktrees explicitly. Unsupported workspace forms and conflicts stop with diagnostics instead of discarding user changes. Permission to implement does not authorize publishing, release, deployment, or production changes. Current SDLC worker instructions prohibit publishing and deployment. Use a separately authorized release/deployment flow with supported tools.
+
+Deterministic tests validate orchestration, not live coding quality or token savings.
 
 ### Built-in code review
 
@@ -230,7 +314,7 @@ The command shows the latest attempt's stored Markdown report, or readable JSON/
 An interactive inspector (`/workflows <runId>` jumps to one run):
 
 - **List**: status (running, interrupted, completed, failed, aborted), agents done, attempts, age, run id. `Enter` inspects, `r` resumes (asks the model to call the tool), `a` aborts (also works for interrupted runs), `d` twice deletes.
-- **Run**: attempts (`[`/`]`), phases, every agent with duration, tokens, cost, profile, model, reuse marks (`↺`), prompt, result preview, error, and the selected agent's unresolved compaction failure. `x` twice cancels the selected running agent.
+- **Run**: attempts (`[`/`]`), phases, every agent with duration, tokens, cost, role/policy identity separately from profile/model routing, reuse marks (`↺`), prompt, result preview, error, and the selected agent's unresolved compaction failure. `x` twice cancels the selected running agent.
 - **Transcript**: `Enter` on an agent shows its full conversation: prompt, thinking, text, tool calls, and tool results.
   Press `e` to read the whole transcript in your editor. It opens as a temporary Markdown file with one `## n. role` heading per item and untruncated tool results. Edits are discarded.
 
@@ -317,9 +401,30 @@ phase('Deep review', { profile: 'thorough' })
 await agent('Inspect authentication boundaries.', { profile: 'fast' })
 ```
 
-Selection precedence is agent > current runtime phase > workflow. Calling a later `phase('Name')` without a profile resets routing to the workflow profile (or inherited session settings), rather than preserving the previous phase's choice. Static `meta.phases` remains documentation only.
+Selection precedence is explicit agent profile > current runtime phase > workflow > selected role fallback > inherited session route. Calling a later `phase('Name')` without a profile resets routing to the workflow profile, then role fallback or inherited session, rather than preserving the previous phase's choice. Static `meta.phases` remains documentation only.
 
-Each selected profile resolves to its configured `provider` when present; otherwise its model resolves on the active session provider. A selected profile may therefore route a child session to another provider, but the workflow author can select only user-approved profile names—not arbitrary provider/model pairs. Unknown profiles, missing or unavailable configured-provider models, and unsupported thinking levels fail the workflow loudly with no fallback. When no profile is selected, or the profile configuration file is absent, child sessions retain the active session model and thinking level. The retired `model` option on `agent()` and phase metadata is rejected; use an approved named profile instead.
+Each selected profile resolves to its configured `provider` when present; otherwise its model resolves on the active session provider. A selected profile may therefore route a child session to another provider, but the workflow author can select only user-approved profile names—not arbitrary provider/model pairs. Unknown profiles, missing or unavailable configured-provider models, and unsupported thinking levels fail the workflow loudly with no fallback. When neither an explicit profile nor a role fallback is selected, child sessions retain the active session model and thinking level. A role fallback must name an enabled, approved profile too. The retired `model` option on `agent()` and phase metadata is rejected; use an approved named profile instead.
+
+### Reusable roles
+
+`agent(prompt, { role: 'implementer' })` selects a reusable definition with enforced tools. Packaged IDs are `analyst`, `implementer`, and `reviewer`. Legacy `agentType` remains a prompt hint, not a permission contract. Do not combine `role` and `agentType`.
+
+Custom Markdown definitions live in user `<Pi agent directory>/agents/*.md` or trusted project `.pi/agents/*.md`. Project definitions take precedence over same-named user definitions for new operations. Packaged IDs are reserved. Example `.pi/agents/api-reviewer.md`:
+
+```markdown
+---
+name: api-reviewer
+description: Inspect public API compatibility.
+tools: [read, ls, find, grep, git_inspect]
+---
+Inspect affected callers and compatibility boundaries. State concrete evidence and limitations.
+```
+
+The body supplies instructions. Frontmatter accepts only `name`, `description`, required `tools`, optional `denyTools`, `enabled`, and approved fallback `profile`. Tool identities are exact, with no wildcards. `tools: []` grants no ordinary tools. Do not list or deny controller-owned `structured_output`. Missing, malformed, disabled, or incompatible selections fail before generation. For SDLC, select variants with `policy.roles`, for example `{"reviewer":"api-reviewer"}`.
+
+Effective access is host admission intersected with the task ceiling and role allowlist, minus denials. Analyst/reviewer ceilings do not permit arbitrary shell or editing. `toolset: 'review'` adds a restriction, never a grant. Tool ownership is checked during execution, including nested calls and recovery. Role snapshots are pinned for an operation and its continuations. Editing a definition does not silently replace an interrupted task. Current revocation can block further work while saved results remain readable.
+
+Routing precedence is explicit agent profile > phase profile > workflow profile > role fallback > inherited session route. Profiles select models, not permissions. Roles do not provide filesystem containment for a coding agent with shell access.
 
 ### Editor IntelliSense
 
@@ -346,9 +451,9 @@ This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, an
 
 ### Failure contracts
 
-Ordinary subagent failures return `null` and log the failure. `parallel()` and `pipeline()` also turn ordinary thrown branch/stage errors into `null`. Check for partial failures before synthesis. Cancellation and approved-profile routing failures reject instead of becoming `null`; invalid runtime options also reject before an executor is invoked. A subagent whose final message has no text answers with a failure (`null`), never with an empty string.
+Ordinary subagent failures return `null` and log the failure. `parallel()` and `pipeline()` also turn ordinary thrown branch/stage errors into `null`. Check for partial failures before synthesis. Cancellation, approved-profile routing failures, and role-policy failures reject instead of becoming `null`; invalid runtime options also reject before an executor is invoked. A subagent whose final message has no text answers with a failure (`null`), never with an empty string.
 
-**Limits.** `agent()` rejects once a script has made more than **500** calls in one attempt (reused results count), as a guard against runaway loops. The cap is stored with each attempt, so a replay never depends on later configuration. Raise or remove it for the Pi extension with the environment variable `PI_WORKFLOW_MAX_AGENTS` (a positive integer, or `unlimited`; a malformed value stops the extension from loading), or with `maxAgents` on `WorkflowHost`. Spend limits are separate: see `budget` above.
+**Limits.** The host admits at most **500** agents per attempt, including SDLC agents and reused script calls, as a guard against runaway loops. SDLC also has its separate cumulative `maxTasks` allowance. The cap is stored with each attempt, so a replay never depends on later configuration. Raise or remove it for the Pi extension with the environment variable `PI_WORKFLOW_MAX_AGENTS` (a positive integer, or `unlimited`; a malformed value stops the extension from loading), or with `maxAgents` on `WorkflowHost`. Spend limits are separate: see `budget` above.
 
 ### Git worktree isolation
 
@@ -391,7 +496,7 @@ git worktree remove <worktree-path>
 git branch -d <agent-branch>
 ```
 
-There are no automatic commits, merges, or deletions. Normal Git conflict handling applies. Cleanup intentionally uses non-forcing commands so uncommitted files or unmerged commits are not silently discarded. The interpreter-only `runWorkflow()` API forwards `isolation` to its supplied executor. Real worktree management is provided by `WorkflowHost`.
+For custom scripts using per-agent `isolation`, there are no automatic commits, merges, or deletions. The named SDLC controller has separate operation-owned integration behavior described above. Normal Git conflict handling applies. Cleanup intentionally uses non-forcing commands so uncommitted files or unmerged commits are not silently discarded. The interpreter-only `runWorkflow()` API forwards `isolation` to its supplied executor. Real worktree management is provided by `WorkflowHost`.
 
 ### Replay determinism requirement
 
@@ -408,7 +513,7 @@ Determinism is the author's replay requirement, not a parser guarantee: a resume
 
 Replay caveats:
 
-- Each `agent()` call is identified by a hash of its prompt, label (as written, not the generated default), instructions (phase, `agentType`, `isolation`), `schema`, and resolved model route, plus an occurrence counter for identical calls. Changing any of these re-runs that agent.
+- Each `agent()` call is identified by a hash of its prompt, label (as written, not the generated default), instructions (phase, legacy `agentType`, `isolation`), schema, resolved model route, and any selected role/policy identity, plus an occurrence counter for identical calls. Changing any of these re-runs that agent.
 - Avoid control flow that depends on *which* concurrent agent finishes first (for example `Promise.race` over agents): a replay resolves finished agents instantly, so the race may go differently.
 - Use the script for orchestration, not external side effects. `log()`/`phase()` are rebuilt on replay. Do not depend on mutable host inputs or mutate objects returned by the executor.
 - Terminal renderers sanitize model-written names, phases, activity, logs, previews, and transcripts without rewriting stored records. Single-line fields collapse whitespace; transcripts retain line breaks. Terminal sanitization does not redact credentials.
@@ -437,7 +542,7 @@ Under the hood each distinct schema gets a `structured_output` tool whose parame
 
 ## Tools and extensions for subagents
 
-By default a subagent has Pi Durable's coding tools (`read`, `write`, `edit`, `bash`) and, when you ask for a schema, `structured_output`. Scripts can select `agent(prompt, { toolset: 'review' })` for the fixed [review toolset and restrictions](#built-in-code-review). This selection is part of durable agent identity and excludes all extra extensions for that conversation. Subagents run unattended, so nothing else is shared with them unless you approve it. There are two ways to add tools to ordinary workflows.
+Without a role or review toolset, a subagent has Pi Durable's coding tools (`read`, `write`, `edit`, `bash`) and, when you ask for a schema, `structured_output`. Scripts can select `agent(prompt, { toolset: 'review' })` for the fixed [review toolset and restrictions](#built-in-code-review). This selection is part of durable agent identity and excludes all extra extensions for that conversation. Subagents run unattended, so nothing else is shared with them unless you approve it. There are two ways to add tools to ordinary workflows.
 
 ### MCP servers
 
@@ -468,7 +573,7 @@ Not supported yet: servers that need OAuth sign-in or a `/login` provider token 
 
 ### Pi Durable extensions
 
-Library users can give every subagent their own [Pi Durable extensions](https://www.npmjs.com/package/@earendil-works/pi-durable): tools, prompt sections, hooks (for example a permission check with `hook(ToolTask, { beforeTool })`), and wrappers.
+Library users can admit [Pi Durable extensions](https://www.npmjs.com/package/@earendil-works/pi-durable): tools, prompt sections, hooks (for example a permission check with `hook(ToolTask, { beforeTool })`), and wrappers.
 
 ```ts
 import { WorkflowHost, createMcpProvider } from '@andrii-k6a/pi-dynamic-workflows';
@@ -511,7 +616,7 @@ The Pi extension does **not** enable these capabilities automatically or inherit
 
 Pi (coding-agent) extensions are not loaded into subagents: Pi Durable has its own extension model and no loader for them. Port the parts a subagent needs: a tool becomes `defineTool` (returning `output`, not `content`), prompt text a `section()`, `tool_call`/`tool_result` handlers `hook(ToolTask, …)`, state a `defineDoc`. Commands and UI have no equivalent because subagents are headless; model access comes from the parent's `ModelRuntime`. Durable codemode and tool search are available through explicit library configuration as shown above, not through Pi's extension loader.
 
-**Parent safeguards do not apply to subagents.** Ordinary subagents run unattended with Pi Durable's `bash`, `write`, and `edit`. The fixed [review toolset](#built-in-code-review) is the exception. A permission gate, protected-path rule, or any other `tool_call` handler in a Pi extension sees the parent's `workflow` call, but not the commands and edits its subagents perform. Treat approving an ordinary workflow as approving everything its subagents may do in the working directory. Pi's own tool restrictions still apply to the `workflow` tool itself: `--no-tools`, `--tools`, and `--exclude-tools workflow` keep it off. Library hosts can enforce a policy on subagent tools with `hook(ToolTask, { beforeTool })` in a Pi Durable extension.
+**Parent safeguards do not apply to subagents.** Unrestricted subagents run unattended with Pi Durable's `bash`, `write`, and `edit`. The fixed [review toolset](#built-in-code-review) and [role policies](#reusable-roles) restrict tools inside this runtime. Role conversations select guarded tools, not unrelated hooks or wrappers from an admitted extension bundle. A permission gate, protected-path rule, or any other `tool_call` handler in a Pi extension sees the parent's `workflow` call, but not the commands and edits its subagents perform. Approve workflows with their effective tools and filesystem access in mind. Shell access is not contained to the working directory. Pi's own tool restrictions still apply to the `workflow` tool itself: `--no-tools`, `--tools`, and `--exclude-tools workflow` keep it off. Library hosts can enforce a policy on unrestricted subagent tools with `hook(ToolTask, { beforeTool })` in a Pi Durable extension. Role calls instead use their guarded tool bundle and the host's `roles.admitTool`, `roles.revokedRoles`, and implementation-revision checks. Do not assume unrelated extension hooks are selected into a role conversation.
 
 ## How it works
 
@@ -530,7 +635,7 @@ user prompt
 - **Effect sandwich.** An agent first commits its intent (the conversation and a checkpoint), then performs the work, then commits the outcome with usage. Prompts are submitted with idempotent request ids, so a restart reattaches to the same submission instead of asking twice.
 - **Model access.** Subagents use Pi's own `ModelRuntime` (Pi Durable accepts it as pi-ai `Models`), so they share the session's providers, auth, and request transforms. A subagent runs on the session model and thinking level unless a profile routes it elsewhere; the route is recorded per agent.
 - **Prompts.** Subagents get a Pi-style system prompt (rules, `AGENTS.md`/project context, skills, working directory) captured once when the run is created, so a resumed run keeps the same prompt and warm provider caches. Provider failures retry durably (3 retries with backoff) and long contexts compact automatically.
-- **Tools.** Ordinary subagents use Pi Durable's `read`, `write`, `edit`, and `bash` (an interrupted `read` simply runs again), plus `structured_output` when a schema is requested, plus any [approved MCP tools and extensions](#tools-and-extensions-for-subagents). Review agents use the fixed [inspection-only toolset](#built-in-code-review). The `workflow` tool is not available to them, so they cannot start nested workflows.
+- **Tools.** Unrestricted subagents use Pi Durable's `read`, `write`, `edit`, and `bash` (an interrupted `read` simply runs again), plus `structured_output` when a schema is requested, plus any [approved MCP tools and extensions](#tools-and-extensions-for-subagents). Review agents use the fixed [inspection-only toolset](#built-in-code-review). Role-selected agents receive only their effective permitted implementations. The `workflow` tool is not available to them, so they cannot start nested workflows.
 - **Usage.** Subagent token usage and cost are summed from each conversation's durable usage ledger (failed and aborted attempts included) and returned to the parent session with the completed result and a crash-safe receipt (see [Resuming](#resuming)). `budget.spent()` counts reported tokens, falling back to an estimate for successful agents that report none; reused results count toward `budget.spent()` in the script, but not toward the new attempt's reported spend.
 
 ### Differences from the previous in-memory backend
@@ -548,7 +653,13 @@ import { WorkflowHost, createMcpProvider, runWorkflow } from '@andrii-k6a/pi-dyn
 import type { WorkflowRunBinding, WorkflowExtensionProvider } from '@andrii-k6a/pi-dynamic-workflows';
 ```
 
-`WorkflowHost.resume(runId, { resumeProfile }, binding)` supports the same [explicit recovery](#resuming) policy as the tool. `WorkflowHost.start(options, binding)` and `resume(runId, options, binding)` accept `tokenBudget` next to `script`, `args`, and `concurrency`; the host option `maxAgents` (default `DEFAULT_MAX_AGENTS`, 500) caps `agent()` calls per attempt. Both return a handle with `wait()`, `watch()`, `abort()`, `acknowledgeUsage()`, and `close()`. A binding supplies pi-ai `Models`, the default `route`, approved-profile resolution, and captured prompt context. Always close handles (or `host.closeAll()` on shutdown); closing releases resources without aborting durable work. If `wait()` returns a usage receipt, durably record it with the usage before acknowledging it. See [Resuming](#resuming) for crash-safe delivery.
+`WorkflowHost.resume(runId, { resumeProfile }, binding)` supports the same [explicit recovery](#resuming) policy as the tool. `WorkflowHost.start(options, binding)` and `resume(runId, options, binding)` accept `tokenBudget` next to `script`, `args`, and `concurrency`; the host option `maxAgents` (default `DEFAULT_MAX_AGENTS`, 500) caps `agent()` calls per attempt. Both return a handle with `wait()`, `watch()`, `abort()`, `acknowledgeUsage()`, and `close()`. A binding supplies pi-ai `Models`, the default `route`, approved-profile resolution, and captured prompt context. For SDLC, an optional `onWorkspaceSelected(workspace)` callback receives the exact recorded destination after its durable intent is committed and before any task is scheduled or checkout is created. New starts, runtime-recovering `resume`, and `continueSdlc` call it. Retrieving a completed result schedules nothing and does not call it. An aborted `signal` aborts the attempt before workspace execution. Always close handles (or `host.closeAll()` on shutdown); closing releases resources without aborting durable work. If `wait()` returns a usage receipt, durably record it with the usage before acknowledging it. See [Resuming](#resuming) for crash-safe delivery.
+
+`SDLC_SCRIPT` and `validateSdlcArgs` are exported alongside `SdlcArgs`, `ContinueSdlcOptions`, and role contracts. `createSdlcBrief`, `SDLC_REVIEW_SCHEMA`, `SDLC_REVIEW_INSTRUCTIONS`, and `validateSdlcReview` support independent assessment in embedding applications. A schema-valid review alone does not establish acceptance. SDLC validates review semantics inside `structured_output`, so reviewers can correct invalid judgments before success is recorded. `validateSdlcReview` accepts an optional fifth argument listing configured check IDs for validation of `outcomes[].checkIds`. To close a pending operation finding, use its qualified ID and supply current source locations in `findingDispositions[].observations`, or return that qualified finding as `REFUTED` with references. Start an operation with `host.start({ script: SDLC_SCRIPT, args, cwd }, binding)`. `host.inspectSdlc(runId, binding)` reads operation state, `host.answerSdlc(runId, { questionId, briefRevision, answer }, binding)` records an answer, and `host.continueSdlc(runId, options, binding)` explicitly schedules another attempt under the same operation identity. Continuation returns the normal `WorkflowAttemptHandle` and uses the same receipt acknowledgement protocol. `host.sdlcArtifact(runId, evidenceId)` retrieves one evidence artifact without executing work.
+
+`WorkflowHost({ roles: { agentDir, projectRoot, revokedRoles, admitTool, toolRevision, researchTools } })` configures role discovery and current admission. The callbacks receive concrete tool registrations, not name-based grants. `createWorkflowRoleServices`, `listWorkflowRoles`, and `parseWorkflowRole` are exported for embedding hosts. Project definitions require the recorded root's trust decision. Pinning a role does not bypass current revocation.
+
+Role-selected external tools require an explicit implementation and configuration revision through `roles.toolRevision(owner, tool)`. Change this revision when captured backend settings or implementation dependencies change. Function-source hashes alone cannot identify closure configuration. The native MCP bridge supplies its own effective transport revision and rejects changed configuration on recovery. Custom MCP transport factories must supply `McpProviderOptions.transportRevision` or a host tool revision before their tools can be selected by a role. Ordinary legacy agents retain their existing tool behavior.
 
 `WorkflowHost.result(runId, binding)` opens only a completed result and returns the same handle without scheduling work. It rejects unfinished, failed, or aborted runs. Receipt acknowledgement and handle cleanup follow the same rules as `start()` and `resume()`.
 
@@ -563,12 +674,12 @@ pi-dynamic-workflows/
 ├── src/
 │   ├── dynamic-workflows.ts  # Pi registration and extension lifecycle only
 │   ├── library.ts            # Supported package-root embedding API
-│   ├── workflow/             # Contracts, parser, VM, execution, and plain snapshots
+│   ├── workflow/             # Contracts, parser, VM, execution, roles, SDLC contracts, snapshots
 │   ├── profiles/             # Profile contracts, file configuration, and routing
-│   ├── durable/              # Run lifecycle, persistence, ownership, billing, reports
+│   ├── durable/              # Run lifecycle, persistence, ownership, billing, reports, SDLC state and workspaces, roles
 │   │   ├── tasks/            # Task contracts, factory, run/agent machines, outcomes
 │   │   └── mcp/              # MCP configuration and connection/tool provider
-│   ├── pi/                   # Pi tool, inspector, and terminal display adapters
+│   ├── pi/                   # Pi tool, SDLC and review commands, inspector, and display adapters
 │   │   └── profiles/         # Profile manager, list, wizard, and route choices
 │   └── shared/               # Terminal text, JSON conversion, and usage arithmetic
 ├── __tests__/                # Mirrors workflow/, profiles/, durable/, pi/, shared/
@@ -576,7 +687,7 @@ pi-dynamic-workflows/
 │   ├── architecture.test.ts  # Dependency boundaries and cycle checks
 │   └── library-consumer.test.ts
 ├── types/workflow.d.ts       # Workflow-author editor globals, separate from library types
-├── examples/                 # Sample profile and MCP configurations
+├── examples/                 # Profile/MCP configurations
 ├── dist/                     # Generated JS/declarations; mirrors src/, never hand-edited
 ├── tsconfig.build.json
 ├── package.json
@@ -588,12 +699,12 @@ Internal module responsibilities (these are not public import paths):
 
 | Area | Main modules and responsibilities |
 | --- | --- |
-| `src/workflow/` | `contracts.ts` holds metadata/executor/status contracts; `parser.ts` and `validation.ts` validate scripts; `sandbox.ts` constructs the VM; `runtime.ts` orchestrates injected executors; `builtins.ts` resolves named templates in `builtins/`; `snapshot.ts` holds renderer-independent projections and preview helpers. |
+| `src/workflow/` | `contracts.ts` holds metadata/executor/status contracts; `parser.ts` and `validation.ts` validate scripts; `sandbox.ts` constructs the VM; `runtime.ts` orchestrates injected executors; `builtins.ts` resolves named templates in `builtins/`; `roles.ts` holds role contracts; `sdlc/` holds SDLC input, review, and outcome contracts with `builtins/sdlc.ts`; `snapshot.ts` holds renderer-independent projections and preview helpers. |
 | `src/profiles/` | `contracts.ts` defines profiles and routing errors; `config.ts` validates and atomically saves user-owned files; `routing.ts` resolves approved routes without loading configuration or UI. |
-| `src/durable/` | `host.ts` drives runs; `docs.ts` owns durable records; `store.ts` owns directories and leases; `open-run.ts` owns open resources; `billing.ts`/`usage-delivery.ts` reconcile receipts; `report.ts` maps records to snapshots/transcripts; `providers.ts`/`extension-admission.ts` define and validate host extensions; `subagent.ts` supplies prompt/output extensions. |
+| `src/durable/` | `host.ts` drives runs; `docs.ts` owns durable records; `store.ts` owns directories and leases; `open-run.ts` owns open resources; `billing.ts`/`usage-delivery.ts` reconcile receipts; `report.ts` maps records to snapshots/transcripts; `providers.ts`/`extension-admission.ts` define and validate host extensions; `subagent.ts` supplies prompt/output extensions; `roles.ts` and `role-definitions.ts` enforce role tools; `sdlc.ts`, `sdlc-state.ts`, `sdlc-runtime.ts`, `sdlc-checks.ts`, `sdlc-observation.ts`, and `sdlc-workspace.ts` own the SDLC controller, durable operation records, checks, evidence, and Git workspaces. |
 | `src/durable/tasks/` | `factory.ts` wires `run.ts` and `agent.ts` to a per-run schema cache. `contracts.ts` owns replay inputs/checkpoints/services; `outcome.ts` formats authoritative task outcomes. |
 | `src/durable/mcp/` | `config.ts` reads allowlists and Pi's MCP settings; `provider.ts` owns shared connections and approved durable tools. |
-| `src/pi/` | `workflow-tool.ts` adapts Pi calls to the host; `background.ts` owns session-scoped execution and result-ready recovery; `runs-command.ts` implements `/workflows`; `builtin-commands.ts` captures review input and launches built-ins; `display.ts` renders plain snapshots and forwards a progress update only when its picture changed; `limits.ts` reads `PI_WORKFLOW_MAX_AGENTS`. |
+| `src/pi/` | `workflow-tool.ts` adapts Pi calls to the host; `background.ts` owns session-scoped execution and result-ready recovery; `runs-command.ts` implements `/workflows`; `builtin-commands.ts` captures review input and launches built-ins; `sdlc-command.ts`, `sdlc-input.ts`, and `sdlc-display.ts` implement `/sdlc` parsing, notices, and status; `display.ts` renders plain snapshots and forwards a progress update only when its picture changed; `limits.ts` reads `PI_WORKFLOW_MAX_AGENTS`. |
 | `src/pi/profiles/` | `manager.ts` orchestrates `/workflow-profiles`; `list.ts` and `wizard.ts` own interaction state; `choices.ts` filters models and thinking levels for the current Pi session. |
 | `src/shared/` | Neutral `terminal-text.ts`, `json-values.ts`, and `usage.ts` helpers, without dependencies on workflow, durable, or UI modules. |
 
@@ -628,7 +739,7 @@ Vitest tests live in `packages/pi-dynamic-workflows/__tests__/`, grouped to mirr
 
 ## Status
 
-The core workflow primitive (script, subagents, parallel/pipeline, phases, abort, structured output) is durable and resumable on Pi Durable 1.3.0, with a `/workflows` inspector. Durable codemode and tool search are opt-in for library hosts. Not implemented yet: automatic codemode inheritance and MCP deferred-exposure mapping, OAuth for MCP servers, loading Pi extensions into subagents (not a Pi Durable feature), automatic pruning of old runs, and background (detached) runs that outlive the Pi process.
+Custom scripts require at least one `agent()` call. Named SDLC also supports validated zero-agent `no-work`. Custom scripts, standalone code review, reusable enforced roles, and adaptive SDLC use Pi Durable 1.3.0, with a `/workflows` inspector. SDLC result acceptance requires current checks and independent goal assessment, not merely runtime completion. Deterministic tests are not evidence of live-model quality or cost savings. Durable codemode and tool search are opt-in for library hosts. Not implemented yet: automatic codemode inheritance and MCP deferred-exposure mapping, OAuth for MCP servers, loading Pi extensions into subagents (not a Pi Durable feature), automatic pruning of old runs, and background (detached) runs that outlive the Pi process.
 
 ## License
 

@@ -1,6 +1,7 @@
 import type { Usage } from '@earendil-works/pi-ai';
 import type { TSchema } from 'typebox';
 import type { ResolvedWorkflowProfile, WorkflowProfileResolver } from '../profiles/contracts.js';
+import type { WorkflowResolvedRole, WorkflowRoleResolver } from './roles.js';
 
 export interface WorkflowMetaPhase {
   title: string;
@@ -51,6 +52,15 @@ export interface WorkflowAgentRunOptions {
   isolation?: 'worktree';
   /** Fixed inspection-only tool selection, enforced by the durable executor. */
   toolset?: 'review';
+  /** Enforced reusable role, resolved by the host rather than by the script. */
+  role?: string;
+  resolvedRole?: WorkflowResolvedRole;
+  /** Controller-selected workspace. Not an agent() script option. */
+  cwd?: string;
+  /** Controller-owned input identity included in durable reuse keys. */
+  inputRevision?: string;
+  /** Controller-owned bound on execution time. */
+  timeoutMs?: number;
   /** Report spend, including spend of a failed run. */
   onUsage?: (usage: Usage) => void;
 }
@@ -80,6 +90,8 @@ export interface WorkflowRunOptions {
   syncTimeoutMs?: number;
   signal?: AbortSignal;
   profileResolver?: WorkflowProfileResolver;
+  /** Resolve and pin role definitions and effective tool policies before scheduling. */
+  roleResolver?: WorkflowRoleResolver;
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
   onAgentStart?: (event: {
@@ -101,7 +113,7 @@ export interface WorkflowRunResult<T = unknown> {
   usage: Usage;
 }
 
-export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema | undefined> {
+export type AgentOptions<TSchemaDef extends TSchema | undefined = TSchema | undefined> = {
   label?: string;
   phase?: string;
   schema?: TSchemaDef;
@@ -110,5 +122,8 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   isolation?: 'worktree';
   /** Fixed inspection-only tool selection. Not an OS sandbox. */
   toolset?: 'review';
-  agentType?: string;
-}
+} & (
+  | { role?: string; agentType?: never }
+  /** Legacy agentType is a prompt hint, not an enforced capability contract. */
+  | { role?: never; agentType?: string }
+);

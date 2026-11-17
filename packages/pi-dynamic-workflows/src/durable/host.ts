@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
 import type { JsonValue } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, type Models, type Usage } from '@earendil-works/pi-ai';
@@ -17,6 +18,7 @@ import {
   SessionFailed,
   type TaskId,
   type TaskOutcome,
+  type ToolRegistration,
   UsageDoc
 } from '@earendil-works/pi-durable';
 import type { ExecutionEnv } from '@earendil-works/pi-durable/env';
@@ -24,14 +26,19 @@ import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { WorkflowProfileRoutingError } from '../profiles/contracts.js';
-import { optionalJsonArgument } from '../shared/json-values.js';
-import { sumUsageState } from '../shared/usage.js';
+import { jsonValue, optionalJsonArgument } from '../shared/json-values.js';
+import { addUsage, sumUsageState } from '../shared/usage.js';
 import { CODE_REVIEW_SCRIPT } from '../workflow/builtins/code-review.js';
 import {
   MAX_REVIEW_DIFF_CHARS,
   validateCodeReviewArgs
 } from '../workflow/builtins/code-review-input.js';
+import { SDLC_SCRIPT } from '../workflow/builtins/sdlc.js';
 import { parseWorkflowScript } from '../workflow/parser.js';
+import { resolveStageRoles, type WorkflowResolvedRole } from '../workflow/roles.js';
+import type { ContinueSdlcOptions, SdlcAnswer, SdlcArgs } from '../workflow/sdlc/contracts.js';
+import { validateFinding } from '../workflow/sdlc/review.js';
+import { ownsPath, validateSdlcArgs } from '../workflow/sdlc/validation.js';
 import {
   preview,
   type WorkflowRunDisplayStatus,
@@ -46,6 +53,7 @@ import {
   type WorkflowPauseState,
   WorkflowPromptContextDoc,
   type WorkflowPromptContextState,
+  WorkflowRoleContextDoc,
   type WorkflowRoute,
   WorkflowRunDoc,
   type WorkflowRunState
@@ -66,6 +74,23 @@ import {
 } from './report.js';
 import { ReviewTools, validateReviewTarget } from './review-tools.js';
 import {
+  createWorkflowRoleServices,
+  guardWorkflowRoleModels,
+  type WorkflowRoleServiceOptions,
+  workflowRoleExecutionId
+} from './roles.js';
+import { applySdlcAnswers, applySdlcContinuation, initialSdlcState } from './sdlc.js';
+import { discoverSdlcChecks } from './sdlc-checks.js';
+import { changedSdlcFiles, observeSdlcFiles } from './sdlc-observation.js';
+import { bindSdlcServices } from './sdlc-runtime.js';
+import { type SdlcState, WorkflowSdlcDoc } from './sdlc-state.js';
+import {
+  acquireSdlcWorkspaceLease,
+  planSdlcWorkspace,
+  type SdlcWorkspace,
+  validateSdlcWorkspace
+} from './sdlc-workspace.js';
+import {
   acquireRunLock,
   appendRunReport,
   assertValidRunId,
@@ -74,6 +99,7 @@ import {
   listRuns,
   removeRunDirectory,
   runDatabasePath,
+  runDirectory,
   runDirectoryExists,
   runExists,
   runLockOwner,
@@ -91,7 +117,8 @@ import {
   type WorkflowAgentInput,
   type WorkflowAgentTaskResult,
   type WorkflowRunInput,
-  type WorkflowRunTaskResult
+  type WorkflowRunTaskResult,
+  type WorkflowTaskServices
 } from './tasks/contracts.js';
 import { createWorkflowTasks } from './tasks/factory.js';
 import { outcomeMessage as outcomeError } from './tasks/outcome.js';
@@ -124,6 +151,8 @@ export interface WorkflowRunBinding {
   projectTrusted?: boolean | ((cwd: string) => boolean);
   /** Parent tool-result destination, used to reconcile usage delivery across process crashes. */
   usageDelivery?: { sessionFile: string; toolCallId: string };
+  /** Called after workspace intent is durable and before SDLC work is scheduled. */
+  onWorkspaceSelected?(workspace: SdlcWorkspace): void | Promise<void>;
   /** The workflow tool call's signal: cancelling it stops a run from opening. */
   signal?: AbortSignal;
 }
@@ -154,6 +183,16 @@ export interface WorkflowHostOptions {
    * Default 500; `Infinity` removes the limit. Stored with each attempt, so replays agree.
    */
   maxAgents?: number;
+  /** Role discovery paths and current admission. Changes do not replace stored role snapshots. */
+  roles?: {
+    agentDir?: string;
+    projectRoot?: string;
+    revokedRoles?: WorkflowRoleServiceOptions['revokedRoles'];
+    admitTool?: WorkflowRoleServiceOptions['admitTool'];
+    toolRevision?: WorkflowRoleServiceOptions['toolRevision'];
+    /** Select exact implementations from admitted provider/host extensions, never names alone. */
+    researchTools?: (extensions: readonly Extension[]) => readonly ToolRegistration[];
+  };
 }
 
 export interface StartWorkflowOptions {
@@ -221,6 +260,7 @@ export class WorkflowHost {
   readonly runsRoot: string;
   readonly #options: WorkflowHostOptions;
   readonly #open = new Map<string, OpenRun>();
+  readonly #services = new WeakMap<OpenRun, WorkflowTaskServices>();
 
   constructor(options: WorkflowHostOptions = {}) {
     validateHostExtensions(options.extensions ?? []);
@@ -265,6 +305,11 @@ export class WorkflowHost {
   ): Promise<WorkflowAttemptHandle> {
     if (binding.signal?.aborted) throw new Error('Workflow was aborted');
     const { meta } = parseWorkflowScript(options.script);
+    const isSdlc = options.script === SDLC_SCRIPT;
+    if (isSdlc) {
+      validateSdlcArgs(options.args);
+      this.#assertLocalSdlc(options.args.workspace?.cwd ?? options.cwd);
+    }
     if (options.script === CODE_REVIEW_SCRIPT) {
       validateCodeReviewArgs(options.args, MAX_REVIEW_DIFF_CHARS);
       if (options.args.profile !== undefined) binding.resolveProfile(options.args.profile);
@@ -284,13 +329,53 @@ export class WorkflowHost {
     if (runDirectoryExists(this.runsRoot, runId)) {
       throw new Error(`could not allocate a unique workflow run id (last tried ${runId})`);
     }
-    const promptContext = await binding.promptContext(options.cwd);
+    const selectedCwd = isSdlc
+      ? resolve(options.cwd, (options.args as SdlcArgs).workspace?.cwd ?? '.')
+      : options.cwd;
+    const promptContext = await binding.promptContext(selectedCwd);
     if (binding.signal?.aborted) throw new Error('Workflow was aborted');
     const open = await this.#openRun(runId, binding);
     let created = false;
     try {
       if (options.script !== CODE_REVIEW_SCRIPT) {
-        await this.#attachExtensions(open, binding, options.cwd);
+        await this.#attachExtensions(open, binding, selectedCwd);
+      }
+      const selectedWorkspace = isSdlc
+        ? await planSdlcWorkspace({
+            operationId: runId,
+            sourceCwd: selectedCwd,
+            storageDir: runDirectory(this.runsRoot, runId),
+            mode: (options.args as SdlcArgs).workspace?.mode ?? 'existing'
+          })
+        : undefined;
+      await this.#bootstrapRoles(
+        open,
+        binding,
+        selectedWorkspace?.repoRoot ?? selectedWorkspace?.sourceCwd ?? options.cwd
+      );
+      let sdlc: SdlcState | undefined;
+      if (isSdlc) {
+        const args = structuredClone(options.args) as SdlcArgs;
+        this.#assertLocalSdlc(selectedCwd);
+        const roles: Partial<Record<string, WorkflowResolvedRole>> = args.noWork
+          ? {}
+          : resolveStageRoles(args.policy?.roles ?? {}, this.#services.get(open)!.roles!.resolve);
+        for (const profile of new Set([
+          args.policy?.profile,
+          ...Object.values(args.policy?.phaseProfiles ?? {}),
+          ...Object.values(roles).map((role) => role?.definition.profile)
+        ])) {
+          if (profile) binding.resolveProfile(profile);
+        }
+        if (args.checks === undefined && !args.noWork)
+          args.checks = await discoverSdlcChecks(this.#env(selectedCwd), context);
+        const workspace = selectedWorkspace!;
+        this.#assertLocalSdlc(workspace.cwd);
+        for (const check of args.checks ?? [])
+          this.#assertLocalSdlc(resolve(workspace.cwd, check.cwd ?? '.'));
+        sdlc = initialSdlcState(runId, args, workspace, options.tokenBudget, options.concurrency);
+        sdlc.roleSnapshots = JSON.parse(JSON.stringify(roles));
+        await this.#importSdlcEvidence(sdlc);
       }
       if (binding.signal?.aborted) throw new Error('Workflow was aborted');
       const scriptHash = hashScript(options.script);
@@ -303,6 +388,7 @@ export class WorkflowHost {
         run.description = meta.description;
         run.cwd = options.cwd;
         run.createdAt = createdAt;
+        if (sdlc) (await tx.doc(WorkflowSdlcDoc)).state = sdlc;
         if (binding.parentSessionFile) run.parentSessionFile = binding.parentSessionFile;
         const prompt = await tx.doc(WorkflowPromptContextDoc);
         prompt.contextFiles = promptContext.contextFiles.map((file) => ({ ...file }));
@@ -336,6 +422,7 @@ export class WorkflowHost {
       }, context);
       created = true;
       await this.#writeIndex(open);
+      await this.#announceSdlcWorkspace(open, binding, attemptId);
       open.harness.resume();
       return this.#handle(open, attemptId, 1, 'started');
     } catch (error) {
@@ -387,7 +474,20 @@ export class WorkflowHost {
       if (latestId === undefined || !latest)
         throw new Error(`workflow run ${runId} has no attempts`);
       const previous = latest.input as WorkflowRunInput;
+      if (
+        previous.script === SDLC_SCRIPT &&
+        (options.script !== undefined ||
+          options.args !== undefined ||
+          options.tokenBudget !== undefined ||
+          options.concurrency !== undefined)
+      ) {
+        throw new Error(
+          'SDLC resume preserves recorded inputs and limits. Use continueSdlc for explicit updates.'
+        );
+      }
       const script = options.script ?? previous.script;
+      if (script === SDLC_SCRIPT && previous.script !== SDLC_SCRIPT)
+        throw new Error('Start SDLC explicitly; legacy runs cannot be reinterpreted as operations');
       const scriptHash = hashScript(script);
       const args = options.args === undefined ? previous.args : optionalJsonArgument(options.args);
       let reviewProfile: string | undefined;
@@ -502,11 +602,23 @@ export class WorkflowHost {
           }
         }
       }
-      if (script !== CODE_REVIEW_SCRIPT || previous.script !== CODE_REVIEW_SCRIPT) {
-        await this.#attachExtensions(open, binding, previous.cwd);
+      if (script === SDLC_SCRIPT) {
+        this.#acquireSdlcWorkspace(open, (await this.#sdlcState(open)).workspace);
+        await this.#validateSdlcRecovery(open);
       }
+      if (script !== CODE_REVIEW_SCRIPT || previous.script !== CODE_REVIEW_SCRIPT) {
+        await this.#attachExtensions(
+          open,
+          binding,
+          script === SDLC_SCRIPT ? (await this.#sdlcState(open)).workspace.sourceCwd : previous.cwd
+        );
+      }
+      if (script === SDLC_SCRIPT)
+        this.#assertLocalSdlc((await this.#sdlcState(open)).workspace.cwd);
+      await this.#bootstrapRoles(open, binding, previous.cwd, live && !canContinue);
       if (binding.signal?.aborted) throw new Error('Workflow was aborted');
       if (canContinue) {
+        await this.#announceSdlcWorkspace(open, binding, latestId);
         harness.resume();
         return this.#handle(open, latestId, previous.number, 'continued');
       }
@@ -517,6 +629,16 @@ export class WorkflowHost {
         await harness.waitForTask(latestId as TaskId, context);
       }
 
+      if (script === SDLC_SCRIPT)
+        await harness.commit(async (tx) => {
+          const operation = await tx.doc(WorkflowSdlcDoc);
+          if (operation.state?.outcome === 'cancelled') {
+            delete operation.state.outcome;
+            delete operation.state.result;
+            operation.state.activity =
+              'Explicit runtime recovery admitted with retained writer inputs';
+          }
+        }, context);
       const number = run.attempts.length + 1;
       const at = this.#now();
       const root = await harness.root(context);
@@ -553,11 +675,340 @@ export class WorkflowHost {
         return id;
       }, context);
       await this.#writeIndex(open);
+      await this.#announceSdlcWorkspace(open, binding, attemptId);
       harness.resume();
       return this.#handle(open, attemptId, number, 'retried');
     } catch (error) {
       await open.close();
       throw error;
+    }
+  }
+
+  /** Stored SDLC state remains readable even if current role/tool access was revoked. */
+  async inspectSdlc(runId: string, _binding?: WorkflowRunBinding): Promise<SdlcState> {
+    return this.#read(runId, async (open) => {
+      const state = await this.#sdlcState(open);
+      state.usage = sumUsageState(await open.harness.usage(context)) as StoredUsage;
+      return state;
+    });
+  }
+
+  /** Selective artifact retrieval. The operation document remains the authoritative manifest. */
+  async sdlcArtifact(runId: string, evidenceId: string) {
+    const state = await this.inspectSdlc(runId);
+    const evidence = state.evidence.find((item) => item.id === evidenceId);
+    if (!evidence) throw new Error(`Unknown SDLC evidence ${evidenceId}`);
+    return evidence;
+  }
+
+  /** Record an answer atomically. Answer delivery never schedules a task. */
+  async answerSdlc(
+    runId: string,
+    answer: SdlcAnswer,
+    _binding?: WorkflowRunBinding
+  ): Promise<void> {
+    await this.#read(runId, async (open) => {
+      await this.#requireSettledSdlc(open);
+      await open.harness.commit(async (tx) => {
+        const doc = await tx.doc(WorkflowSdlcDoc);
+        if (!doc.state) throw new Error(`Workflow ${runId} is not an SDLC operation`);
+        const state = JSON.parse(JSON.stringify(doc.state)) as SdlcState;
+        applySdlcAnswers(state, [answer], this.#now());
+        doc.state = state;
+      }, context);
+    });
+  }
+
+  /** Explicit new attempt of the same operation. Limits, role policies and usage do not reset. */
+  async continueSdlc(
+    runId: string,
+    options: ContinueSdlcOptions,
+    binding: WorkflowRunBinding
+  ): Promise<WorkflowAttemptHandle> {
+    assertValidRunId(runId);
+    if (binding.signal?.aborted) throw new Error('Workflow was aborted');
+    if (!runExists(this.runsRoot, runId)) throw new Error(`unknown workflow run ${runId}`);
+    const open = await this.#openRun(runId, binding);
+    try {
+      await this.#requireSettledSdlc(open);
+      const run = await readRun(open.harness);
+      const latest = await open.harness.getTask(
+        run.attempts.at(-1)! as TaskId<WorkflowRunTaskResult>,
+        context
+      );
+      const previous = latest!.input as WorkflowRunInput;
+      const state = await this.#sdlcState(open);
+      this.#assertLocalSdlc(state.workspace.cwd);
+      this.#acquireSdlcWorkspace(open, state.workspace);
+      await this.#validateSdlcRecovery(open);
+      applySdlcContinuation(state, options, this.#now());
+      for (const check of state.args.checks ?? [])
+        this.#assertLocalSdlc(resolve(state.workspace.cwd, check.cwd ?? '.'));
+      await this.#attachExtensions(open, binding, state.workspace.sourceCwd);
+      await this.#bootstrapRoles(open, binding, run.cwd);
+      const recovery = options.resumeProfile
+        ? { profile: options.resumeProfile, route: binding.resolveProfile(options.resumeProfile) }
+        : previous.recovery;
+      if (recovery) binding.resolveProfile(recovery.profile, recovery.route);
+      const prior = await open.harness.snapshot(WorkflowAttemptDoc, String(latest!.id), context);
+      const profileRoutes = { ...previous.profileRoutes, ...prior?.profileRoutes };
+      if (!recovery)
+        for (const [name, route] of Object.entries(profileRoutes))
+          binding.resolveProfile(name, route);
+      if (binding.signal?.aborted) throw new Error('Workflow was aborted');
+      const number = run.attempts.length + 1;
+      const root = await open.harness.root(context);
+      const id = await root.commit(async (tx) => {
+        (await tx.doc(WorkflowSdlcDoc)).state = state;
+        const input: WorkflowRunInput = {
+          ...previous,
+          number,
+          reuse: true,
+          profileRoutes,
+          ...(recovery ? { recovery } : {}),
+          concurrency: state.limits.concurrency,
+          tokenBudget: state.limits.tokenBudget
+        };
+        const id = await tx.createTask(open.tasks.RunTask, input, {
+          ownership: { kind: 'conversation' }
+        });
+        (await tx.doc(WorkflowRunDoc)).attempts.push(id);
+        await tx.doc(WorkflowAttemptDoc, String(id), {
+          number,
+          taskId: id,
+          scriptHash: previous.scriptHash,
+          at: this.#now()
+        });
+        return id;
+      }, context);
+      await this.#writeIndex(open);
+      await this.#announceSdlcWorkspace(open, binding, id);
+      open.harness.resume();
+      return this.#handle(open, id, number, 'retried');
+    } catch (error) {
+      await open.close();
+      throw error;
+    }
+  }
+
+  #acquireSdlcWorkspace(open: OpenRun, workspace: SdlcWorkspace): void {
+    open.sdlcWorkspaceLease ??= acquireSdlcWorkspaceLease(workspace);
+  }
+
+  async #validateSdlcRecovery(open: OpenRun): Promise<void> {
+    const saved = await open.harness.snapshot(WorkflowSdlcDoc, context);
+    if (!saved?.state || saved.state.setup !== 'ready') return;
+    const state = saved.state;
+    try {
+      await validateSdlcWorkspace(state.workspace);
+      for (const task of state.tasks) {
+        if (!['running', 'preparing'].includes(task.status) || !task.workspace) continue;
+        await validateSdlcWorkspace(task.workspace);
+        if (!task.filesBefore) continue;
+        const current = await observeSdlcFiles(task.workspace, (cwd) => this.#env(cwd), context);
+        const unexpected = changedSdlcFiles(task.filesBefore, current).filter(
+          (path) => task.kind !== 'implementation' || !ownsPath(task.writes, path)
+        );
+        if (unexpected.length)
+          throw new Error(
+            `unexpected changes outside ${task.id} ownership: ${unexpected.join(', ')}`
+          );
+      }
+    } catch (error) {
+      throw new Error(
+        `Cannot resume SDLC owned workspace: ${error instanceof Error ? error.message : String(error)}. Restore the recorded workspace without discarding user changes.`,
+        { cause: error }
+      );
+    }
+  }
+
+  async #announceSdlcWorkspace(
+    open: OpenRun,
+    binding: WorkflowRunBinding,
+    attemptId: number
+  ): Promise<void> {
+    if (!binding.onWorkspaceSelected) return;
+    const operation = await open.harness.snapshot(WorkflowSdlcDoc, context);
+    if (!operation?.state) return;
+    await binding.onWorkspaceSelected(structuredClone(operation.state.workspace));
+    if (binding.signal?.aborted) {
+      await open.harness.abortTask(attemptId as TaskId, context);
+      throw new Error('Workflow was aborted before workspace execution');
+    }
+  }
+
+  async #sdlcState(open: OpenRun): Promise<SdlcState> {
+    const saved = await open.harness.snapshot(WorkflowSdlcDoc, context);
+    if (!saved?.state || saved.state.version !== 1)
+      throw new Error(`Workflow ${open.runId} has no supported SDLC operation record`);
+    return structuredClone(saved.state) as SdlcState;
+  }
+
+  async #requireSettledSdlc(open: OpenRun): Promise<void> {
+    await this.#sdlcState(open);
+    const run = await readRun(open.harness);
+    const latest = run.attempts.at(-1);
+    const record =
+      latest === undefined ? undefined : await open.harness.getTask(latest as TaskId, context);
+    if (!record || record.state.status !== 'terminal')
+      throw new Error(
+        'SDLC work is live or interrupted. Resume or cancel it before answering or continuing.'
+      );
+  }
+
+  #env(cwd: string): ExecutionEnv {
+    return this.#options.env?.(cwd) ?? new NodeExecutionEnv({ cwd });
+  }
+
+  #assertLocalSdlc(cwd: string): void {
+    if (!(this.#env(cwd) instanceof NodeExecutionEnv))
+      throw new Error(
+        'SDLC workspace effects require a local NodeExecutionEnv. Nonlocal execution is unsupported; no workspace was changed.'
+      );
+  }
+
+  async #bootstrapRoles(
+    open: OpenRun,
+    binding: WorkflowRunBinding,
+    cwd: string,
+    draining = false
+  ): Promise<void> {
+    const services = this.#services.get(open)!;
+    const saved = await open.harness.snapshot(WorkflowRoleContextDoc, context);
+    const projectRoot = saved?.projectRoot ?? resolve(this.#options.roles?.projectRoot ?? cwd);
+    const agentDir = saved?.agentDir ?? this.#options.roles?.agentDir;
+    services.roles = createWorkflowRoleServices({
+      projectRoot,
+      ...(agentDir ? { agentDir } : {}),
+      projectTrusted:
+        typeof binding.projectTrusted === 'function'
+          ? binding.projectTrusted(projectRoot)
+          : (binding.projectTrusted ?? false),
+      extensions: () => [...open.extras.extensions.values()],
+      researchTools: () =>
+        this.#options.roles?.researchTools?.([...open.extras.extensions.values()]) ?? [],
+      admitTool: this.#options.roles?.admitTool,
+      toolRevision: this.#options.roles?.toolRevision,
+      revokedRoles: this.#options.roles?.revokedRoles,
+      recheckProfile: (name, pinned) => {
+        binding.resolveProfile(name, pinned);
+      }
+    });
+    const operation = await open.harness.snapshot(WorkflowSdlcDoc, context);
+    for (const role of Object.values(operation?.state?.roleSnapshots ?? {}))
+      services.roles.pin(role as unknown as WorkflowResolvedRole);
+    // Terminal task inputs retain snapshots after their parent's checkpoints have been removed.
+    const terminalRoles: WorkflowResolvedRole[] = [];
+    await open.harness.commit(async (tx) => {
+      let cursor: Cursor | undefined;
+      do {
+        const page = await tx.scanTasks(
+          { kind: AGENT_TASK_NAME, status: 'terminal', order: 'ascending' },
+          200,
+          cursor
+        );
+        for (const record of page.items) {
+          const input = record.input as WorkflowAgentInput;
+          if (input.resolvedRole)
+            terminalRoles.push(
+              JSON.parse(JSON.stringify(input.resolvedRole)) as WorkflowResolvedRole
+            );
+        }
+        cursor = page.next;
+      } while (cursor);
+    }, context);
+    for (const role of terminalRoles) services.roles.pin(role);
+    // Restore both the policy cache and the actual guarded tool bundles BEFORE scheduling.
+    for (const live of (await open.harness.inspect(context)).tasks) {
+      if (live.record.kind === 'workflow.run') {
+        const input = live.record.input as WorkflowRunInput;
+        const checkpoint = live.record.state.checkpoint as RunCheckpoint | undefined;
+        for (const role of Object.values({ ...input.roles, ...checkpoint?.roles }))
+          services.roles.pin(role);
+      }
+      if (live.record.kind !== AGENT_TASK_NAME) continue;
+      const input = live.record.input as WorkflowAgentInput;
+      if (!input.resolvedRole) continue;
+      services.roles.pin(input.resolvedRole);
+      if (live.record.state.status === 'terminal' || draining) continue;
+      const deadline = (live.record.state.checkpoint as AgentCheckpoint | undefined)?.deadline;
+      if (deadline !== undefined && deadline <= this.#now()) {
+        await open.harness.abortTask(live.record.id as TaskId, context);
+        await open.harness.commit(async (tx) => {
+          const attempt = await tx.doc(WorkflowAttemptDoc, String(input.attemptId), {
+            number: 0,
+            taskId: input.attemptId,
+            scriptHash: '',
+            at: this.#now()
+          });
+          attempt.logs.push(
+            `${input.label}: task deadline expired during interruption; stopped owned work before another provider request`
+          );
+        }, context);
+        continue;
+      }
+      services.install(
+        services.roles.prepare(
+          { ...input, executionId: workflowRoleExecutionId(input) },
+          input.schema === undefined ? undefined : open.tasks.outputExtension(input.schema)
+        )
+      );
+    }
+    if (!saved?.projectRoot)
+      await open.harness.commit(async (tx) => {
+        const doc = await tx.doc(WorkflowRoleContextDoc);
+        doc.projectRoot = projectRoot;
+        doc.agentDir = agentDir ?? null;
+      }, context);
+  }
+
+  async #importSdlcEvidence(state: SdlcState): Promise<void> {
+    for (const source of state.args.evidence ?? []) {
+      const report = await this.report(source.runId);
+      const attempt = report.attempts.find((attempt) => attempt.number === source.attempt);
+      if (
+        attempt?.script !== CODE_REVIEW_SCRIPT ||
+        attempt.status !== 'completed' ||
+        !attempt.result ||
+        typeof attempt.result !== 'object' ||
+        Array.isArray(attempt.result)
+      )
+        throw new Error(
+          `SDLC evidence ${source.runId} attempt ${source.attempt} is not a completed structured code review`
+        );
+      const result = attempt.result;
+      if (!Array.isArray(result.findings))
+        throw new Error('Imported review has no structured findings');
+      const identity = `${source.runId}:a${source.attempt}`;
+      for (const item of result.findings) {
+        const finding = validateFinding(item, report.run.cwd);
+        state.importedFindings.push({ ...finding, id: `${identity}:${finding.id}` });
+      }
+      for (const row of Object.values(attempt.agents))
+        if (row.usage)
+          state.importedUsage = addUsage(state.importedUsage, row.usage) as StoredUsage;
+      state.evidence.push({
+        id: `import:${identity}`,
+        kind: 'import',
+        producingTask: identity,
+        briefRevision: state.brief.revision,
+        goalRevision: state.brief.goalRevision,
+        inputRevision: hashScript(JSON.stringify(result)),
+        candidateRevision: state.candidateRevision,
+        scope: ['historical claims'],
+        dependencies: [],
+        result: jsonValue({
+          source,
+          findings: state.importedFindings.filter((finding) =>
+            finding.id.startsWith(`${identity}:`)
+          ),
+          limitations: result.limitations ?? [],
+          scope: result.scope ?? null
+        }),
+        limitations: [
+          'Historical findings are claims, not fresh candidate acceptance evidence. Verify closure independently.'
+        ]
+      });
     }
   }
 
@@ -876,7 +1327,7 @@ export class WorkflowHost {
       const registry = createRegistry();
       const installed = new Set<string>();
       const extras: RunExtras = { extensions: new Map(), notes: [], leases: [] };
-      const tasks = createWorkflowTasks({
+      const services: WorkflowTaskServices = {
         install(extension) {
           if (installed.has(extension.name)) return;
           installed.add(extension.name);
@@ -898,7 +1349,8 @@ export class WorkflowHost {
           return { found, missing };
         },
         notes: () => extras.notes
-      });
+      };
+      const tasks = createWorkflowTasks(services);
       registry.install(CodingTools);
       registry.install(SubagentExtension);
       registry.install(ReviewTools);
@@ -912,7 +1364,10 @@ export class WorkflowHost {
         harness = await Harness.open(
           storage,
           {
-            models: binding?.models ?? createModels(),
+            models: guardWorkflowRoleModels(
+              binding?.models ?? createModels(),
+              () => services.roles
+            ),
             registry,
             settings: {
               extensions: [CodingTools, SubagentExtension],
@@ -952,6 +1407,23 @@ export class WorkflowHost {
         }
       );
       this.#open.set(runId, open);
+      this.#services.set(open, services);
+      bindSdlcServices(services, {
+        acquire: (workspace) => {
+          this.#acquireSdlcWorkspace(open, workspace);
+          // Restored children can outlive their controller. Only closing the harness releases ownership.
+          return () => {};
+        },
+        env: (cwd) => {
+          const env = this.#env(cwd);
+          if (!(env instanceof NodeExecutionEnv))
+            throw new Error(
+              'SDLC requires local execution for the workspace and all checks; nonlocal fallback is not allowed'
+            );
+          return env;
+        },
+        usage: async () => sumUsageState(await open.harness.usage(context)) as StoredUsage
+      });
       return open;
     } catch (error) {
       await harness?.close(context).catch(() => {});

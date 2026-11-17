@@ -1,7 +1,18 @@
 import { CODE_REVIEW_SCRIPT } from './builtins/code-review.js';
 import { MAX_REVIEW_DIFF_CHARS, validateCodeReviewArgs } from './builtins/code-review-input.js';
+import { SDLC_SCRIPT } from './builtins/sdlc.js';
+import { validateSdlcArgs } from './sdlc/validation.js';
 
 export const BUILTIN_WORKFLOWS = [
+  {
+    name: 'sdlc',
+    description:
+      'Carry a goal through adaptive implementation, integration, checks, and independent code and goal review. args: { goal: string, context?: string | string[], constraints?: string[], acceptance?: Array<string | { id?: string, description: string, verification?: "behavioral" | "inspection", checkIds?: string[] }>, checks?: Array<{ id: string, argv: string[], kind: "test" | "check", outcomes: string[] }>, workspace?: { mode: "existing" | "isolated", cwd?: string }, evidence?: Array<{ kind: "code-review", runId: string, attempt: number }>, planning?: "auto" | "investigate", policy?: object }. Questions and explicit continuation retain the run identity and cumulative allowance.',
+    resolve(value: object = {}): string {
+      validateSdlcArgs(value);
+      return SDLC_SCRIPT;
+    }
+  },
   {
     name: 'code-review',
     description:

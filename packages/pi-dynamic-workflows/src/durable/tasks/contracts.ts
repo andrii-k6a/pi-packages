@@ -1,6 +1,8 @@
 import type { JsonValue } from '@earendil-works/chord';
 import type { Extension } from '@earendil-works/pi-durable';
+import type { WorkflowResolvedRole } from '../../workflow/roles.js';
 import type { StoredUsage, WorkflowRoute } from '../docs.js';
+import type { WorkflowRoleServices } from '../roles.js';
 import type { WorkflowWorktree } from '../worktree.js';
 
 export const RUN_TASK_NAME = 'workflow.run';
@@ -35,6 +37,8 @@ export type WorkflowRunInput = {
    * same set; names are resolved against the registry the restarted process installs.
    */
   extensions?: string[];
+  /** Role policies pinned for this operation; old runs omit this field. */
+  roles?: Record<string, WorkflowResolvedRole>;
 };
 
 export type RunCheckpoint = {
@@ -45,6 +49,8 @@ export type RunCheckpoint = {
   reused: Record<string, number>;
   /** Logical profile name -> route, pinned on first use and stable for the attempt's replays. */
   routes: Record<string, WorkflowRoute>;
+  /** Selected definitions and policies retained across replay. */
+  roles?: Record<string, WorkflowResolvedRole>;
 };
 
 export type WorkflowRunTaskResult = {
@@ -66,6 +72,10 @@ export type WorkflowAgentInput = {
   profile?: string;
   logicalRoute?: WorkflowRoute;
   recovery?: true;
+  role?: string;
+  resolvedRole?: WorkflowResolvedRole;
+  inputRevision?: string;
+  timeoutMs?: number;
   cwd: string;
   isolation?: 'worktree';
   /** Fixed review restriction, pinned with the task across restart. */
@@ -74,7 +84,7 @@ export type WorkflowAgentInput = {
   extensions?: string[];
 };
 
-export type AgentCheckpoint = { worktree?: WorkflowWorktree } & (
+export type AgentCheckpoint = { worktree?: WorkflowWorktree; deadline?: number } & (
   | { phase: 'start' }
   | {
       phase: 'run';
@@ -105,4 +115,6 @@ export interface WorkflowTaskServices {
   extensions(names: readonly string[]): { found: Extension[]; missing: string[] };
   /** What the providers opened for this run could and could not offer, one line each. */
   notes(): readonly string[];
+  /** Optional for legacy hosts. A role-bearing task fails closed when unavailable. */
+  roles?: WorkflowRoleServices;
 }

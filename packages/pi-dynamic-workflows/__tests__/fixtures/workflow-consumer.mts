@@ -47,6 +47,20 @@ const nullableStages: Array<string | null> = stages;
 // @ts-expect-error pipeline catches ordinary thrown stage errors.
 const nonNullableStages: string[] = stages;
 
+const roleProse: string | null = await agent('review', { role: 'reviewer', toolset: 'review' });
+await agent('legacy', { agentType: 'reviewer' });
+await agent<{ count: number }>('implement', { role: 'implementer', schema });
+// @ts-expect-error Enforced roles and legacy hints are mutually exclusive.
+await agent('ambiguous', { role: 'reviewer', agentType: 'reviewer' });
+// @ts-expect-error Workspace selection belongs to the controller, not scripts.
+await agent('wrong workspace', { role: 'implementer', cwd: '/tmp' });
+// @ts-expect-error Scripts cannot inject a resolved role policy.
+await agent('forged', { resolvedRole: {} });
+// @ts-expect-error Task time limits belong to the controller, not scripts.
+await agent('wrong timeout', { role: 'implementer', timeoutMs: 1 });
+// @ts-expect-error Scripts cannot choose the controller's capability ceiling.
+await agent('wrong ceiling', { role: 'implementer', ceiling: 'implementer' });
+
 // log() takes any number of values, like console.log.
 log('count:', 3, { nested: [1, 2] });
 log();

@@ -96,6 +96,11 @@ export class WorkflowBackgroundRuns {
     return this.#runs.get(runId)?.snapshot;
   }
 
+  /** Command foreground waits still use deferred result retrieval, preserving native usage delivery. */
+  async wait(runId: string): Promise<void> {
+    await this.#runs.get(runId)?.finished;
+  }
+
   /** A result query never waits for live agents, only for a terminal run's lease to close. */
   async prepareResult(runId: string): Promise<boolean> {
     const run = this.#runs.get(runId);
@@ -150,6 +155,11 @@ export class WorkflowBackgroundRuns {
     }
     const content = [
       `Background workflow ${terminalLine(snapshot.name)} ${status} (run ${runId}, attempt ${snapshot.attempt}).`,
+      ...(snapshot.name === 'sdlc' && status === 'completed'
+        ? [
+            'Runtime completion does not imply SDLC acceptance. Read the product outcome in the result.'
+          ]
+        : []),
       status === 'completed'
         ? `Report available: /workflows ${runId} --report. Call workflow with ${JSON.stringify({ result: runId })} to retrieve the result and record its usage. Do not resume or rerun it.`
         : workflowFailureSummary(snapshot, error).join('\n')

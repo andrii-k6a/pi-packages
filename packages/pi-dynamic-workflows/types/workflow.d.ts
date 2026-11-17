@@ -27,7 +27,7 @@ declare global {
     profile?: string;
   }
 
-  interface WorkflowAgentOptions<TSchema = JsonSchema> {
+  type WorkflowAgentOptions<TSchema = JsonSchema> = {
     /** Short label shown in the live progress UI. */
     label?: string;
     /** Override the current runtime phase for this agent. */
@@ -43,9 +43,18 @@ declare global {
     isolation?: 'worktree';
     /** Use the fixed read-only review tools. No editing, arbitrary execution, or extra extensions. Not an OS sandbox. */
     toolset?: 'review';
-    /** Requested subagent role/type. */
-    agentType?: string;
-  }
+  } & (
+    | {
+        /** Enforced reusable definition. Mutually exclusive with the legacy agentType hint. */
+        role?: string;
+        agentType?: never;
+      }
+    | {
+        role?: never;
+        /** Legacy prompt hint only. Does not restrict tools or load a role definition. */
+        agentType?: string;
+      }
+  );
 
   type JsonPrimitive = string | number | boolean | null;
   type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -76,11 +85,11 @@ declare global {
 
   /**
    * Spawn a subagent with separate conversation context, but shared filesystem access.
-   * Ordinary executor failures return null. Abort and profile routing failures reject.
+   * Ordinary executor failures return null. Abort, profile routing, and role policy failures reject.
    * Prose output is string; schema output is unknown unless an explicit generic is supplied.
    *
    * Runs are durable: when a run is resumed the script is replayed from the top, and an identical call
-   * (same prompt, label, instructions, schema, and route) returns its recorded result instead of running again.
+   * (same prompt, label, instructions, schema, route, and pinned role policy) returns its recorded result instead of running again.
    */
   function agent<T = unknown>(
     prompt: string,

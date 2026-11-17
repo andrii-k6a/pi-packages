@@ -18,12 +18,14 @@ import {
 } from '@earendil-works/pi-mcp';
 import { Type } from 'typebox';
 import { terminalLine } from '../../shared/terminal-text.js';
+import { roleHash } from '../../workflow/roles.js';
 import { ownInternalExtension } from '../extension-admission.js';
 import type {
   WorkflowExtensionProvider,
   WorkflowProviderContext,
   WorkflowProviderLease
 } from '../providers.js';
+import { pinWorkflowToolRevision } from '../tool-identity.js';
 import {
   createToolMatcher,
   expandHome,
@@ -60,6 +62,8 @@ export interface McpProviderOptions {
   /** Per server, covering the handshake and the tool listing. Default 15 s. */
   connectTimeoutMs?: number;
   createTransport?: McpTransportFactory;
+  /** Required for role-selected tools when using a custom transport factory. */
+  transportRevision?: string;
 }
 
 /**
@@ -178,7 +182,10 @@ function createServerExtension(
   const tools: ToolRegistration[] = [];
   for (const tool of connection.tools) {
     if (!allowed(tool.name) || isHiddenByPi(config, tool.name)) continue;
-    tools.push(createMcpTool(server, names.get(tool.name) as string, tool, connection));
+    const registration = createMcpTool(server, names.get(tool.name) as string, tool, connection);
+    if (connection.backendRevision)
+      pinWorkflowToolRevision(registration, connection.backendRevision);
+    tools.push(registration);
   }
   return {
     extension: ownInternalExtension(
@@ -255,6 +262,7 @@ class McpPool {
 class McpConnection {
   refs = 0;
   tools: McpTool[] = [];
+  backendRevision?: string;
   #client: McpClient | undefined;
   #connecting: Promise<McpClient> | undefined;
   #initial: Promise<void> | undefined;
@@ -309,11 +317,25 @@ class McpConnection {
       roots: [{ uri: pathToFileURL(cwd).href, name: basename(cwd) }]
     });
     try {
-      const transport = this.options.createTransport
-        ? this.options.createTransport(this.target)
+      const resolved = this.options.createTransport
+        ? {
+            transport: this.options.createTransport(this.target),
+            revision: this.options.transportRevision
+              ? roleHash({
+                  bridge: CLIENT_VERSION,
+                  target: this.key,
+                  transport: this.options.transportRevision
+                })
+              : undefined
+          }
         : await createDefaultTransport(this.target);
+      if (this.backendRevision !== undefined && resolved.revision !== this.backendRevision)
+        throw new McpFailure(
+          'connection configuration changed; reopen the run to revalidate its pinned tools'
+        );
+      this.backendRevision = resolved.revision;
       await withTimeout(
-        client.connect(transport),
+        client.connect(resolved.transport),
         timeoutMs,
         `connecting to MCP server "${name}" timed out after ${Math.round(timeoutMs / 1000)}s`
       );
@@ -346,12 +368,16 @@ async function createDefaultTransport({
   name,
   config,
   cwd
-}: McpServerTarget): Promise<McpTransport> {
+}: McpServerTarget): Promise<{ transport: McpTransport; revision: string }> {
   if ('url' in config) {
-    return new StreamableHttpTransport({
+    const settings = {
       url: config.url,
       headers: await resolveHeaders(config.headers, `MCP server "${name}"`)
-    });
+    };
+    return {
+      transport: new StreamableHttpTransport(settings),
+      revision: roleHash({ bridge: CLIENT_VERSION, name, cwd, config, settings })
+    };
   }
   const env: Record<string, string> = {};
   await Promise.all(
@@ -359,13 +385,23 @@ async function createDefaultTransport({
       env[key] = await resolveConfigValueAsync(value, `MCP server "${name}" env "${key}"`);
     })
   );
-  return new StdioTransport({
+  const settings = {
     command: expandHome(config.command),
     args: config.args?.map(expandHome),
     cwd: resolve(cwd, expandHome(config.cwd ?? '.')),
     env,
-    stderr: 'pipe'
-  });
+    stderr: 'pipe' as const
+  };
+  return {
+    transport: new StdioTransport(settings),
+    revision: roleHash({
+      bridge: CLIENT_VERSION,
+      name,
+      config,
+      settings,
+      inheritedEnvironment: process.env
+    })
+  };
 }
 
 /* ───────────────────────── helpers ───────────────────────── */

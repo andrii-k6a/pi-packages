@@ -934,6 +934,8 @@ function runDetailSections(
   const current = rows[selected];
   if (current) {
     details.push('', ` #${current.index} ${sanitize(current.label)}`);
+    if (current.role) details.push(`   role ${sanitize(current.role)}`);
+    if (current.rolePolicy) details.push(`   role policy ${sanitize(current.rolePolicy)}`);
     if (current.model)
       details.push(
         `   model ${sanitize(current.model)}${current.thinkingLevel ? ` · thinking ${current.thinkingLevel}` : ''}`
@@ -966,6 +968,7 @@ function agentDetailLine(row: WorkflowAgentRow, now: number): string {
       : undefined,
     row.usage?.totalTokens ? `${formatTokens(row.usage.totalTokens)} tok` : undefined,
     row.usage?.cost?.total ? formatCost(row.usage.cost.total) : undefined,
+    row.role ? `role ${sanitize(row.role)}` : undefined,
     row.profile ? `profile ${sanitize(row.profile)}` : undefined
   ].filter(Boolean);
   const icon =

@@ -38,9 +38,16 @@ test('built package root is importable by a plain Node ESM consumer', () => {
     '-e',
     `
     import assert from 'node:assert/strict';
-    import { WorkflowHost, createMcpProvider, runWorkflow } from '@andrii-k6a/pi-dynamic-workflows';
+    import { WorkflowHost, createMcpProvider, runWorkflow, SDLC_SCRIPT, validateSdlcArgs, DEFAULT_SDLC_LIMITS } from '@andrii-k6a/pi-dynamic-workflows';
+    assert.match(SDLC_SCRIPT, /name: 'sdlc'/);
+    assert.equal(DEFAULT_SDLC_LIMITS.maxTasks, 24);
+    validateSdlcArgs({ goal: 'Check the supported API' });
+    assert.throws(() => validateSdlcArgs({}), /SDLC goal/);
     const host = new WorkflowHost({ providers: [createMcpProvider({ allowlist: { servers: {} } })] });
     assert.equal(typeof host.start, 'function');
+    assert.equal(typeof host.inspectSdlc, 'function');
+    assert.equal(typeof host.answerSdlc, 'function');
+    assert.equal(typeof host.continueSdlc, 'function');
     await host.closeAll();
     const result = await runWorkflow("export const meta = { name: 'consumer', description: 'smoke' }\\nreturn await agent('ok')", {
       agent: { run: async (prompt) => prompt }

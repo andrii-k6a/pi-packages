@@ -16,7 +16,9 @@ import {
   reviewOutputContract,
   validateReviewOutput
 } from '../../workflow/builtins/code-review-output.js';
+import { SDLC_SCRIPT } from '../../workflow/builtins/sdlc.js';
 import type { WorkflowAgentExecutor, WorkflowAgentRunOptions } from '../../workflow/contracts.js';
+import { WorkflowRoleError } from '../../workflow/roles.js';
 import { runWorkflow } from '../../workflow/runtime.js';
 import { preview } from '../../workflow/snapshot.js';
 import {
@@ -29,6 +31,9 @@ import {
   type WorkflowRoute,
   WorkflowRunDoc
 } from '../docs.js';
+import { workflowRoleExecutionId } from '../roles.js';
+import { executeDurableSdlc } from '../sdlc-runtime.js';
+import { WorkflowSdlcDoc } from '../sdlc-state.js';
 import { canonicalJson, STRUCTURED_OUTPUT_CONTRACT } from '../subagent.js';
 import type { createAgentTask } from './agent.js';
 import {
@@ -96,7 +101,21 @@ export function createRunTask(
 
         const executor: WorkflowAgentExecutor = {
           async run(prompt, options) {
-            const route = options.route ? routeFor(options.profile ?? '') : input.route;
+            const resolvedRole =
+              options.resolvedRole ??
+              (options.role
+                ? services.roles?.resolve(options.role, { toolset: options.toolset })
+                : undefined);
+            if (options.role && !resolvedRole)
+              throw new Error(`Workflow role ${options.role} cannot be resolved by this host`);
+            if (resolvedRole) services.roles?.pin(resolvedRole);
+            const profile = options.profile ?? resolvedRole?.definition.profile;
+            const route = profile ? routeFor(profile) : input.route;
+            options = {
+              ...options,
+              ...(profile ? { profile } : {}),
+              ...(resolvedRole ? { resolvedRole } : {})
+            };
             const baseKey = agentBaseKey(prompt, options, route);
             const occurrence = (occurrences.get(baseKey) ?? 0) + 1;
             occurrences.set(baseKey, occurrence);
@@ -117,6 +136,14 @@ export function createRunTask(
                   ? reusable.get(key)
                   : (reusable.get(key) ?? (await reusableFromTask(tx, reusedId)));
               const attempt = await tx.doc(WorkflowAttemptDoc, attemptKey, seed);
+              if (
+                input.maxAgents !== undefined &&
+                attempt.agents[key] === undefined &&
+                Object.keys(attempt.agents).length >= input.maxAgents
+              )
+                throw new Error(
+                  `workflow agent limit reached: at most ${input.maxAgents} agent() calls are allowed per attempt`
+                );
               if (reusedResult && outputContract) {
                 try {
                   validateReviewOutput(reusedResult.value, outputContract);
@@ -127,6 +154,11 @@ export function createRunTask(
               }
               const routes = { ...input.profileRoutes, ...checkpoint.routes, ...pendingRoutes };
               attempt.profileRoutes = routes;
+              const roles = {
+                ...input.roles,
+                ...checkpoint.roles,
+                ...(resolvedRole ? { [resolvedRole.policy.hash]: resolvedRole } : {})
+              };
               if (reusedResult) {
                 if (reusedId !== undefined) return undefined;
                 attempt.agents[key] = agentRowDraft(
@@ -151,6 +183,7 @@ export function createRunTask(
                   checkpoint: {
                     ...checkpoint,
                     routes,
+                    ...(Object.keys(roles).length ? { roles } : {}),
                     reused: { ...checkpoint.reused, [key]: reusedResult.taskId }
                   }
                 };
@@ -182,7 +215,11 @@ export function createRunTask(
                   ...(input.recovery
                     ? { recovery: true as const, ...(route ? { logicalRoute: route } : {}) }
                     : {}),
-                  cwd: input.cwd,
+                  cwd: options.cwd ?? input.cwd,
+                  ...(options.role ? { role: options.role } : {}),
+                  ...(resolvedRole ? { resolvedRole } : {}),
+                  ...(options.inputRevision ? { inputRevision: options.inputRevision } : {}),
+                  ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
                   ...(options.isolation ? { isolation: options.isolation } : {}),
                   ...(options.toolset ? { toolset: options.toolset } : {}),
                   ...(input.extensions?.length ? { extensions: input.extensions } : {})
@@ -205,6 +242,7 @@ export function createRunTask(
                 checkpoint: {
                   ...checkpoint,
                   routes,
+                  ...(Object.keys(roles).length ? { roles } : {}),
                   agents: { ...checkpoint.agents, [key]: agentId }
                 }
               };
@@ -221,11 +259,19 @@ export function createRunTask(
               context
             );
             const outcome = settled.state.outcome;
+            services.roles?.release(workflowRoleExecutionId({ attemptId: task.id, key }));
             if (outcome.result) options.onUsage?.(outcome.result.usage as Usage);
             switch (outcome.status) {
               case 'completed':
                 return outcome.result.value;
               case 'failed':
+                if (
+                  outcome.error.detail &&
+                  typeof outcome.error.detail === 'object' &&
+                  !Array.isArray(outcome.error.detail) &&
+                  outcome.error.detail.kind === 'workflow-role'
+                )
+                  throw new WorkflowRoleError(outcome.error.message);
                 throw new Error(outcome.error.message);
               case 'aborted':
                 throw new Error(outcome.reason ?? 'subagent was aborted');
@@ -237,27 +283,51 @@ export function createRunTask(
 
         let failure: unknown;
         let value: JsonValue = null;
-        let result: Awaited<ReturnType<typeof runWorkflow>> | undefined;
+        let result:
+          | Pick<Awaited<ReturnType<typeof runWorkflow>>, 'result' | 'agentCount' | 'phases'>
+          | undefined;
         try {
-          result = await runWorkflow(input.script, {
-            agent: executor,
-            args: input.args,
-            cwd: input.cwd,
-            concurrency: input.concurrency,
-            ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
-            ...(input.maxAgents === undefined ? {} : { maxAgents: input.maxAgents }),
-            signal: runtime.signal,
-            profileResolver: (name) => {
-              const route = routeFor(name);
-              return {
-                model: { provider: route.provider, id: route.modelId },
-                thinkingLevel: route.thinkingLevel
-              };
-            },
-            onLog: writer.log,
-            onPhase: writer.phase
-          });
-          if (result.agentCount === 0) {
+          if (input.script === SDLC_SCRIPT) {
+            const phases: string[] = [];
+            const value = await executeDurableSdlc(
+              services,
+              runtime,
+              executor,
+              (title) => {
+                writer.phase(title);
+                if (!phases.includes(title)) phases.push(title);
+              },
+              context
+            );
+            const stored = await runtime.snapshot(WorkflowAttemptDoc, attemptKey, context);
+            result = {
+              result: value,
+              agentCount: Object.keys(stored?.agents ?? {}).length,
+              phases
+            };
+          } else
+            result = await runWorkflow(input.script, {
+              agent: executor,
+              args: input.args,
+              cwd: input.cwd,
+              concurrency: input.concurrency,
+              ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
+              ...(input.maxAgents === undefined ? {} : { maxAgents: input.maxAgents }),
+              signal: runtime.signal,
+              ...(services.roles
+                ? { roleResolver: (name, selection) => services.roles!.resolve(name, selection) }
+                : {}),
+              profileResolver: (name) => {
+                const route = routeFor(name);
+                return {
+                  model: { provider: route.provider, id: route.modelId },
+                  thinkingLevel: route.thinkingLevel
+                };
+              },
+              onLog: writer.log,
+              onPhase: writer.phase
+            });
+          if (result.agentCount === 0 && input.script !== SDLC_SCRIPT) {
             throw new Error(
               'workflow scripts must call agent() at least once; this workflow declared phases but did not run any subagents'
             );
@@ -302,6 +372,14 @@ export function createRunTask(
     abort: async (task, runtime, context) => {
       const endedAt = runtime.now();
       await runtime.commit(async (tx) => {
+        if (task.input.script === SDLC_SCRIPT) {
+          const sdlc = await tx.doc(WorkflowSdlcDoc);
+          if (sdlc.state) {
+            sdlc.state.outcome = 'cancelled';
+            sdlc.state.activity = 'Cancelled; completed work and cumulative usage are retained';
+            delete sdlc.state.result;
+          }
+        }
         const attempt = await tx.doc(WorkflowAttemptDoc, String(task.id), {
           number: task.input.number,
           taskId: task.id,
@@ -350,6 +428,9 @@ function agentRowDraft(
     label: options.label,
     ...(options.phase ? { phase: options.phase } : {}),
     ...(options.profile ? { profile: options.profile } : {}),
+    ...(options.resolvedRole
+      ? { role: options.resolvedRole.definition.id, rolePolicy: options.resolvedRole.policy.hash }
+      : {}),
     ...(route
       ? { model: `${route.provider}/${route.modelId}`, thinkingLevel: route.thinkingLevel }
       : {}),
@@ -367,7 +448,16 @@ export function agentBaseKey(
   prompt: string,
   options: Pick<
     WorkflowAgentRunOptions,
-    'requestedLabel' | 'instructions' | 'schema' | 'isolation' | 'toolset'
+    | 'requestedLabel'
+    | 'instructions'
+    | 'schema'
+    | 'isolation'
+    | 'toolset'
+    | 'role'
+    | 'resolvedRole'
+    | 'cwd'
+    | 'inputRevision'
+    | 'timeoutMs'
   >,
   route: WorkflowRoute | undefined
 ): string {
@@ -380,6 +470,11 @@ export function agentBaseKey(
         schema: options.schema ?? null,
         ...(options.isolation ? { isolation: options.isolation } : {}),
         ...(options.toolset ? { toolset: options.toolset } : {}),
+        ...(options.role ? { role: options.role } : {}),
+        ...(options.resolvedRole ? { resolvedRole: options.resolvedRole } : {}),
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+        ...(options.inputRevision ? { inputRevision: options.inputRevision } : {}),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         route: route ?? null
       })
     )
@@ -469,7 +564,8 @@ async function findReusableResults(
           (!input.recovery ||
             runInput.recovery ||
             canonicalJson(input.logicalRoute ?? null) === canonicalJson(input.route ?? null)) &&
-          input.cwd === runInput.cwd &&
+          (input.cwd === runInput.cwd ||
+            (runInput.script === SDLC_SCRIPT && input.inputRevision !== undefined)) &&
           canonicalJson(input.extensions ?? []) === canonicalJson(runInput.extensions ?? [])
         ) {
           reusable.profile ??= attempts.get(input.attemptId)?.agents[input.key]?.profile;

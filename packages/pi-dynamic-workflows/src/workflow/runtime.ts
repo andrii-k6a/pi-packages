@@ -9,6 +9,12 @@ import {
 import { addUsage, emptyUsage, hasUsage } from '../shared/usage.js';
 import type { AgentOptions, WorkflowRunOptions, WorkflowRunResult } from './contracts.js';
 import { parseWorkflowScript } from './parser.js';
+import {
+  assertResolvedRole,
+  requireRoleId,
+  type WorkflowResolvedRole,
+  WorkflowRoleError
+} from './roles.js';
 import { createWorkflowContext } from './sandbox.js';
 import { requireProfileName, throwProfileMigrationError } from './validation.js';
 
@@ -17,6 +23,7 @@ interface RuntimeState {
   currentProfile?: ResolvedWorkflowProfile;
   currentProfileName?: string;
   profileRoutingError?: WorkflowProfileRoutingError;
+  roleError?: WorkflowRoleError;
   logs: string[];
   phases: string[];
   agentCount: number;
@@ -109,6 +116,7 @@ export async function runWorkflow<T = unknown>(
         if (error instanceof WorkflowProfileRoutingError) {
           state.profileRoutingError ??= error;
         }
+        if (error instanceof WorkflowRoleError) state.roleError ??= error;
       }
     );
     return run;
@@ -121,6 +129,7 @@ export async function runWorkflow<T = unknown>(
     let requestedLabel: string | undefined;
     let profileName: string | undefined;
     let profile: ResolvedWorkflowProfile | undefined;
+    let resolvedRole: WorkflowResolvedRole | undefined;
     try {
       throwIfAborted();
       if (budget.total !== null && budget.remaining() <= 0)
@@ -134,13 +143,29 @@ export async function runWorkflow<T = unknown>(
       normalizedOptions = normalizeAgentOptions(agentOptions);
       assignedPhase = normalizedOptions.phase ?? state.currentPhase;
       requestedLabel = normalizedOptions.label?.trim();
-      profileName = normalizedOptions.profile ?? state.currentProfileName;
-      profile = normalizedOptions.profile
-        ? resolveProfile(normalizedOptions.profile, options.profileResolver)
-        : state.currentProfile;
+      if (normalizedOptions.role) {
+        if (!options.roleResolver)
+          throw new WorkflowRoleError('role resolution is unavailable in this host');
+        resolvedRole = options.roleResolver(normalizedOptions.role, {
+          toolset: normalizedOptions.toolset
+        });
+        assertResolvedRole(resolvedRole);
+        if (resolvedRole.definition.id !== normalizedOptions.role)
+          throw new WorkflowRoleError('the resolver returned a different role');
+        if (normalizedOptions.toolset === 'review' && !resolvedRole.policy.reviewOnly)
+          throw new WorkflowRoleError('the resolver did not enforce the review tool restriction');
+      }
+      profileName =
+        normalizedOptions.profile ?? state.currentProfileName ?? resolvedRole?.definition.profile;
+      profile = profileName
+        ? profileName === state.currentProfileName && !normalizedOptions.profile
+          ? state.currentProfile
+          : resolveProfile(profileName, options.profileResolver)
+        : undefined;
       state.agentCalls++;
     } catch (error) {
       if (error instanceof WorkflowProfileRoutingError) state.profileRoutingError ??= error;
+      if (error instanceof WorkflowRoleError) state.roleError ??= error;
       return trackAgentRun(Promise.reject(error));
     }
 
@@ -164,6 +189,8 @@ export async function runWorkflow<T = unknown>(
           schema: normalizedOptions.schema,
           isolation: normalizedOptions.isolation,
           toolset: normalizedOptions.toolset,
+          role: normalizedOptions.role,
+          resolvedRole,
           signal: options.signal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           route: profile,
@@ -180,7 +207,12 @@ export async function runWorkflow<T = unknown>(
         options.onAgentEnd?.({ label, phase: assignedPhase, result });
         return result;
       } catch (error) {
-        if (options.signal?.aborted || error instanceof WorkflowProfileRoutingError) throw error;
+        if (
+          options.signal?.aborted ||
+          error instanceof WorkflowProfileRoutingError ||
+          error instanceof WorkflowRoleError
+        )
+          throw error;
         record(
           formatLogArguments([
             `agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`
@@ -206,7 +238,12 @@ export async function runWorkflow<T = unknown>(
         try {
           return await thunk();
         } catch (error) {
-          if (options.signal?.aborted || error instanceof WorkflowProfileRoutingError) throw error;
+          if (
+            options.signal?.aborted ||
+            error instanceof WorkflowProfileRoutingError ||
+            error instanceof WorkflowRoleError
+          )
+            throw error;
           record(
             formatLogArguments([
               `parallel[${index}] failed: ${error instanceof Error ? error.message : String(error)}`
@@ -239,7 +276,11 @@ export async function runWorkflow<T = unknown>(
             value = await stage(value, item, index);
             throwIfAborted();
           } catch (error) {
-            if (options.signal?.aborted || error instanceof WorkflowProfileRoutingError)
+            if (
+              options.signal?.aborted ||
+              error instanceof WorkflowProfileRoutingError ||
+              error instanceof WorkflowRoleError
+            )
               throw error;
             record(
               formatLogArguments([
@@ -292,6 +333,7 @@ export async function runWorkflow<T = unknown>(
   const result = await running;
   await Promise.allSettled([...pendingAgentRuns]);
   if (state.profileRoutingError) throw state.profileRoutingError;
+  if (state.roleError) throw state.roleError;
   assertStructuredCloneable(result, 'workflow result');
   return {
     meta,
@@ -363,6 +405,15 @@ function normalizeAgentOptions(value: unknown): AgentOptions {
   if (!value || typeof value !== 'object') throw new TypeError('agent options must be an object');
   const options = value as AgentOptions & { model?: unknown };
   if ('model' in options) throwProfileMigrationError('agent');
+  if (options.role !== undefined && options.agentType !== undefined) {
+    throw new WorkflowRoleError('agent() role and legacy agentType are mutually exclusive');
+  }
+  for (const key of ['cwd', 'inputRevision', 'timeoutMs', 'resolvedRole', 'ceiling']) {
+    if (key in options)
+      throw new WorkflowRoleError(
+        `agent() option ${key} belongs to the controller and cannot be supplied by scripts`
+      );
+  }
   return {
     ...options,
     schema: normalizeSchema(options.schema),
@@ -371,8 +422,9 @@ function normalizeAgentOptions(value: unknown): AgentOptions {
     profile: optionalProfileName(options.profile, 'agent profile'),
     isolation: normalizeIsolation(options.isolation),
     toolset: normalizeToolset(options.toolset),
-    agentType: optionalString(options.agentType, 'agent type')
-  };
+    agentType: optionalString(options.agentType, 'agent type'),
+    role: options.role === undefined ? undefined : requireRoleId(options.role)
+  } as AgentOptions;
 }
 
 /**
@@ -451,6 +503,7 @@ function buildAgentInstructions(
   const lines = [];
   if (phase) lines.push(`Workflow phase: ${phase}`);
   if (options.agentType) lines.push(`Act as workflow subagent type: ${options.agentType}`);
+  if (options.role) lines.push(`Workflow role: ${options.role}`);
   if (options.isolation) lines.push(`Requested isolation: ${options.isolation}`);
   return lines.length ? lines.join('\n') : undefined;
 }

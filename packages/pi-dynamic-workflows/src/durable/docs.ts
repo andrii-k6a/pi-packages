@@ -54,6 +54,17 @@ export const WorkflowRunDoc = defineDoc<WorkflowRunState>({
   })
 });
 
+/** Paths used to resolve roles. Project definitions never follow a worker's checkout cwd. */
+export const WorkflowRoleContextDoc = defineDoc<{
+  projectRoot: string | null;
+  agentDir: string | null;
+}>({
+  kind: 'workflow.role-context',
+  version: 1,
+  scope: 'session',
+  initial: () => ({ projectRoot: null, agentDir: null })
+});
+
 /**
  * Project context captured once when the run is created. Subagent prompt sections render from it,
  * so a resumed run keeps the same system prompt (and warm provider prompt caches).
@@ -81,6 +92,8 @@ export type WorkflowAgentRow = {
   label: string;
   phase?: string;
   profile?: string;
+  role?: string;
+  rolePolicy?: string;
   model?: string;
   thinkingLevel?: string;
   prompt: string;

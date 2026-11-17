@@ -1563,6 +1563,73 @@ return 'no limit'`;
   }
 });
 
+test('a capped retry restores reused results after interruption without consuming another slot', async () => {
+  let stage: 'fail' | 'interrupt' | 'finish' = 'fail';
+  const entered = gate();
+  respond(async ({ prompt, signal }) => {
+    if (prompt === 'b' && stage === 'fail') throw new Error('quota_exceeded');
+    if (prompt === 'b' && stage === 'interrupt') {
+      entered.open();
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('interrupted')), { once: true });
+      });
+    }
+    return text(`ok ${prompt}`);
+  });
+  const script = `${AUDIT_HEADER}
+const a = await agent('a', { label: 'a' })
+const b = await agent('b', { label: 'b' })
+if (b === null) throw new Error('B failed')
+let limit
+try { await agent('third', { label: 'third' }) } catch (error) { limit = error.message }
+return { a, b, limit }`;
+  const first = host({ maxAgents: 2 });
+  const started = await first.start({ script, cwd }, binding());
+  const failed = await started.wait();
+  assert.equal(failed.status, 'failed');
+  if (failed.status === 'failed') assert.match(failed.error, /B failed/);
+  await started.close();
+
+  stage = 'interrupt';
+  const second = host({ maxAgents: 2 });
+  const retried = await second.resume(started.runId, {}, binding());
+  assert.equal(retried.mode, 'retried');
+  assert.equal(retried.attemptNumber, 2);
+  await entered.opened;
+  const before = (await second.report(started.runId)).attempts[1];
+  assert.equal(Object.keys(before.agents).length, 2);
+  const cached = Object.values(before.agents).find((row) => row.label === 'a');
+  const active = Object.values(before.agents).find((row) => row.label === 'b');
+  assert.ok(cached);
+  assert.equal(cached.reusedFrom, 1);
+  assert.ok(active?.taskId);
+  await retried.close();
+  assert.equal((await retried.wait()).status, 'interrupted');
+
+  stage = 'finish';
+  // Later host defaults must not relax the cap recorded for the interrupted attempt.
+  const third = host();
+  const resumed = await third.resume(started.runId, {}, binding());
+  assert.equal(resumed.mode, 'continued');
+  assert.equal(resumed.attemptNumber, 2);
+  const outcome = await resumed.wait();
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed')
+    assert.deepEqual(outcome.value, {
+      a: 'ok a',
+      b: 'ok b',
+      limit: 'workflow agent limit reached: at most 2 agent() calls are allowed per attempt'
+    });
+  await resumed.close();
+  assert.equal(prompts.filter((prompt) => prompt === 'a').length, 1);
+  assert.ok(!prompts.includes('third'));
+  const after = (await third.report(started.runId)).attempts;
+  assert.equal(after.length, 2);
+  assert.equal(Object.keys(after[1].agents).length, 2);
+  assert.equal(after[1].agents[cached.key].reusedFrom, 1);
+  assert.equal(after[1].agents[active.key].taskId, active.taskId);
+});
+
 test('aborting an unknown run fails without creating storage for it', async () => {
   const runs = host();
   const id = '20260101-000000-never_existed-abcd';

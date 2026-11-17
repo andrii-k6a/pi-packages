@@ -20,6 +20,7 @@ import { WorkflowHost, type WorkflowRunBinding } from '../../../src/durable/host
 import { mcpToolNames, type WorkflowMcpAllowlist } from '../../../src/durable/mcp/config.js';
 import { createMcpProvider } from '../../../src/durable/mcp/provider.js';
 import type { WorkflowExtensionProvider } from '../../../src/durable/providers.js';
+import { createWorkflowRoleServices } from '../../../src/durable/roles.js';
 import { SUBAGENT_EXTENSION_NAME } from '../../../src/durable/subagent.js';
 import { createWorkflowRunBinding } from '../../../src/pi/workflow-tool.js';
 
@@ -217,6 +218,49 @@ test('subagents call approved MCP tools; unapproved, Pi-hidden, and unlisted too
   assert.equal(existsSync(join(directory, 'other.log')), false);
   // Closing the run released the connection, which stopped the server.
   await until(() => serverLog().includes('exit'));
+});
+
+test('role-selected MCP tools pin effective backend configuration across reopen', async () => {
+  await writePiConfig({ fake: fake() });
+  await mkdir(join(agentDir, 'agents'));
+  await writeFile(
+    join(agentDir, 'agents/mcp-worker.md'),
+    '---\nname: mcp-worker\ndescription: Use an approved MCP backend\ntools: [mcp__fake__echo]\n---\nCall only the approved backend.\n'
+  );
+  const allowlist = { servers: { fake: { tools: ['echo'] } } };
+  const first = await createMcpProvider({ allowlist, agentDir }).open({
+    cwd,
+    projectTrusted: false
+  });
+  let second: Awaited<ReturnType<WorkflowExtensionProvider['open']>> | undefined;
+  try {
+    const selected = createWorkflowRoleServices({
+      projectRoot: cwd,
+      agentDir,
+      extensions: () => first.extensions
+    }).resolve('mcp-worker');
+    await writePiConfig({
+      fake: fake({ env: { MCP_LOG: log, SECRET_CHECK: 'different backend settings' } })
+    });
+    second = await createMcpProvider({ allowlist, agentDir }).open({ cwd, projectTrusted: false });
+    const reopened = createWorkflowRoleServices({
+      projectRoot: cwd,
+      agentDir,
+      extensions: () => second?.extensions ?? [],
+      pinned: [selected]
+    });
+    assert.throws(
+      () => reopened.prepare({ resolvedRole: selected }),
+      /revoked, unavailable, or changed/
+    );
+    assert.deepEqual(
+      serverLog().filter((line) => line.startsWith('call')),
+      []
+    );
+  } finally {
+    await first.close();
+    await second?.close();
+  }
 });
 
 test('a failing MCP result is an error result for the model, not a failed subagent', async () => {

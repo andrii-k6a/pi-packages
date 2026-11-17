@@ -1,5 +1,5 @@
 import { MAX_REVIEW_DIFF_CHARS, validateCodeReviewArgs } from './code-review-input.js';
-import { createReviewOutputChecks } from './code-review-output.js';
+import { createReviewFindingProperties, createReviewOutputChecks } from './code-review-output.js';
 
 export { MAX_REVIEW_DIFF_CHARS } from './code-review-input.js';
 
@@ -157,26 +157,7 @@ const context = JSON.stringify({ ...source, ...(fileMode ? {} : { diff: args.dif
 const textField = (maxLength, minLength = 1) => ({ type: 'string', minLength, maxLength, ...(minLength ? { pattern: '\\S' } : {}) })
 const reviewContract = { fileMode, cwd }
 const { normalizedPath, checkedText, checkedLimitations, checkedFinding, validateOutput } = (${createReviewOutputChecks.toString()})(fileMode, cwd)
-const locationProperties = {
-  file: textField(500),
-  line: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
-}
-const findingProperties = {
-  ...locationProperties,
-  summary: textField(240),
-  evidence: textField(1000),
-  priority: { type: 'integer', minimum: 1, maximum: 3 },
-  scenario: { ...textField(800), description: 'Reachable trigger and wrong result, or present architectural consequence or maintenance burden.' },
-  alternative: { ...textField(600, 0), description: 'Proportionate behavior-preserving alternative. May be empty for behavioral findings.' },
-  references: {
-    type: 'array', minItems: 1, maxItems: 5,
-    items: {
-      type: 'object', additionalProperties: false,
-      properties: { ...locationProperties, observation: textField(400) },
-      required: ['file', 'line', 'observation']
-    }
-  }
-}
+const findingProperties = ${JSON.stringify(createReviewFindingProperties())}
 const limitationsSchema = { type: 'array', maxItems: 5, description: 'Only specific missing or drifted evidence that affects conclusions. Do not repeat static-inspection, live-file, tool, or coverage caveats already stated by the report.', items: textField(600) }
 const candidateSchema = {
   'x-workflow-review': { ...reviewContract, kind: 'finder' },

@@ -22,6 +22,7 @@ import {
   reviewOutputContract,
   validateReviewOutput
 } from '../workflow/builtins/code-review-output.js';
+import { sdlcReviewOutputContract, validateSdlcReviewOutput } from '../workflow/sdlc/review.js';
 import {
   WorkflowOutputDoc,
   WorkflowPromptContextDoc,
@@ -126,6 +127,8 @@ export function createOutputExtension(schema: TSchema): Extension {
         execute: async (args, api, context) => {
           const contract = reviewOutputContract(schema);
           if (contract) validateReviewOutput(args, contract);
+          const sdlcContract = sdlcReviewOutputContract(schema);
+          if (sdlcContract) validateSdlcReviewOutput(args, sdlcContract);
           await api.commit(async (tx) => {
             const output = await tx.doc(WorkflowOutputDoc, api.conversationId);
             output.set = true;

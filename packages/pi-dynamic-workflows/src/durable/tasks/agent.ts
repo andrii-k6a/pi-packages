@@ -13,6 +13,7 @@ import {
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { emptyUsage, sumUsageState } from '../../shared/usage.js';
 import { classifyWorkflowFailure } from '../../workflow/diagnostics.js';
+import { WorkflowRoleError } from '../../workflow/roles.js';
 import { preview } from '../../workflow/snapshot.js';
 import {
   CANCELLED_ENTRY,
@@ -26,6 +27,7 @@ import {
   WorkflowPauseDoc
 } from '../docs.js';
 import { ReviewTools } from '../review-tools.js';
+import { workflowRoleExecutionId } from '../roles.js';
 import { createSubagentExtension, STRUCTURED_OUTPUT_NUDGE } from '../subagent.js';
 import { ensureWorktree, planWorktree, validateWorktree } from '../worktree.js';
 import {
@@ -61,7 +63,36 @@ export function createAgentTask(
       // aborts the subagent and the ownership index finds it again after a restart.
       start: async (task, runtime, context) => {
         const input = task.input;
-        const { worktree } = task.state.checkpoint;
+        const { worktree, deadline } = task.state.checkpoint;
+        const output = input.schema === undefined ? undefined : outputExtension(input.schema);
+        let roleExtension: Extension | undefined;
+        try {
+          roleExtension = prepareRoleAgent(services, input, output);
+        } catch (error) {
+          await failRoleAgent(runtime, task, context, error);
+          return;
+        }
+        const timeoutMs = input.timeoutMs;
+        if (timeoutMs !== undefined && deadline === undefined) {
+          if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+            throw new Error('agent timeoutMs must be a positive finite number');
+          await runtime.commit(
+            () => ({
+              status: 'running',
+              checkpoint: {
+                phase: 'start',
+                ...(worktree ? { worktree } : {}),
+                deadline: runtime.now() + timeoutMs
+              }
+            }),
+            context
+          );
+          return;
+        }
+        if (deadline !== undefined && runtime.now() >= deadline) {
+          await failTimedOutAgent(runtime, task, context);
+          return;
+        }
         if (input.isolation && !worktree) {
           let planned: Awaited<ReturnType<typeof planWorktree>>;
           try {
@@ -73,7 +104,14 @@ export function createAgentTask(
           await runtime.commit(async (tx) => {
             const row = await agentRow(tx, input, runtime.now());
             if (row) row.worktree = planned;
-            return { status: 'running', checkpoint: { phase: 'start', worktree: planned } };
+            return {
+              status: 'running',
+              checkpoint: {
+                phase: 'start',
+                worktree: planned,
+                ...(deadline === undefined ? {} : { deadline })
+              }
+            };
           }, context);
           return;
         }
@@ -95,9 +133,8 @@ export function createAgentTask(
         ]
           .filter(Boolean)
           .join('\n\n');
-        const output = input.schema === undefined ? undefined : outputExtension(input.schema);
         const provided = services.extensions(
-          input.toolset === 'review' ? [] : (input.extensions ?? [])
+          roleExtension || input.toolset === 'review' ? [] : (input.extensions ?? [])
         );
         await runtime.commit(async (tx) => {
           const existing = (await tx.scanConversations({ ownerTaskId: task.id }, 1)).items[0];
@@ -118,8 +155,9 @@ export function createAgentTask(
               // resolves these name-only references against the registry at each use, so tools
               // return when their extension is installed on a later resume.
               // The output extension comes last so nothing can shadow `structured_output`.
-              extensions:
-                input.toolset === 'review'
+              extensions: roleExtension
+                ? [roleExtension]
+                : input.toolset === 'review'
                   ? [ReviewTools, ReviewSubagentExtension, ...(output ? [output] : [])]
                   : [
                       CodingTools,
@@ -127,9 +165,14 @@ export function createAgentTask(
                       ...(input.extensions ?? []).map((name) => ({ name })),
                       ...(output ? [output] : [])
                     ],
-              ...(input.toolset === 'review'
-                ? { tools: [...(ReviewTools.tools ?? []), ...(output?.tools ?? [])] }
-                : {}),
+              ...(roleExtension
+                ? {
+                    tools: [...(roleExtension.tools ?? [])],
+                    modelTools: [...(roleExtension.tools ?? [])]
+                  }
+                : input.toolset === 'review'
+                  ? { tools: [...(ReviewTools.tools ?? []), ...(output?.tools ?? [])] }
+                  : {}),
               cwd: worktree?.cwd ?? input.cwd,
               ...(instructions ? { instructions } : {})
             });
@@ -152,6 +195,7 @@ export function createAgentTask(
               phase: 'run',
               conversationId,
               nudges: 0,
+              ...(deadline === undefined ? {} : { deadline }),
               ...(worktree ? { worktree } : {})
             }
           };
@@ -161,7 +205,30 @@ export function createAgentTask(
       // re-enters here and reattaches to the same submission; generation resumes on its own.
       run: async (task, runtime, context) => {
         const input = task.input;
-        const { conversationId, nudges, turn = 0, message, worktree } = task.state.checkpoint;
+        const {
+          conversationId,
+          nudges,
+          turn = 0,
+          message,
+          worktree,
+          deadline
+        } = task.state.checkpoint;
+        try {
+          prepareRoleAgent(
+            services,
+            input,
+            input.schema === undefined ? undefined : outputExtension(input.schema)
+          );
+        } catch (error) {
+          await failRoleAgent(runtime, task, context, error);
+          return;
+        }
+        if (deadline !== undefined && runtime.now() >= deadline) {
+          const handle = await runtime.conversation(conversationId as ConversationId, context);
+          await handle?.abort(context);
+          await failTimedOutAgent(runtime, task, context);
+          return;
+        }
         if (worktree) {
           try {
             await validateWorktree(worktree);
@@ -188,7 +255,28 @@ export function createAgentTask(
               : `workflow.agent:${task.id}:nudge:${nudges}`;
         const content = message ?? (nudges === 0 ? input.prompt : STRUCTURED_OUTPUT_NUDGE);
         const submission = await handle.submit({ type: 'input', content, requestId }, context);
-        const settled = await submission.wait(context);
+        let timeoutAbort: Promise<void> | undefined;
+        const stopTimer = armDeadline(
+          deadline,
+          () => runtime.now(),
+          () => {
+            timeoutAbort = handle.abort(context);
+            // The wait below observes this failure after the submission settles.
+            timeoutAbort.catch(() => {});
+          }
+        );
+        let settled: Awaited<ReturnType<typeof submission.wait>>;
+        try {
+          settled = await submission.wait(context);
+        } finally {
+          stopTimer();
+        }
+        if (timeoutAbort) await timeoutAbort;
+        if (timeoutAbort || (deadline !== undefined && runtime.now() >= deadline)) {
+          if (!timeoutAbort) await handle.abort(context);
+          await failTimedOutAgent(runtime, task, context);
+          return;
+        }
         const usage = sumUsageState(await runtime.snapshot(UsageDoc, id, context)) as StoredUsage;
 
         // The user interrupted the agent to pause it: keep the call pending instead of failing it.
@@ -208,6 +296,7 @@ export function createAgentTask(
                 conversationId,
                 nudges,
                 turn,
+                ...(deadline === undefined ? {} : { deadline }),
                 ...(worktree ? { worktree } : {})
               }
             };
@@ -216,6 +305,18 @@ export function createAgentTask(
         }
 
         if (settled.status !== 'done' || settled.type !== 'input') {
+          if (input.resolvedRole) {
+            try {
+              prepareRoleAgent(
+                services,
+                input,
+                input.schema === undefined ? undefined : outputExtension(input.schema)
+              );
+            } catch (error) {
+              await failRoleAgent(runtime, task, context, error);
+              return;
+            }
+          }
           const reason = settled.status === 'unanswered' ? settled.reason : settled.status;
           await finishAgent(
             runtime,
@@ -223,7 +324,12 @@ export function createAgentTask(
             context,
             {
               status: 'failed',
-              error: { message: `subagent did not answer: ${reason}${detailText(settled)}` },
+              error: {
+                message: `subagent did not answer: ${reason}${detailText(settled)}`,
+                ...(/Workflow role:/.test(JSON.stringify(settled.detail ?? ''))
+                  ? { detail: { kind: 'workflow-role' } }
+                  : {})
+              },
               result: { value: null, usage, conversationId }
             },
             classifyWorkflowFailure({ detail: settled.detail, message: reason })
@@ -244,6 +350,7 @@ export function createAgentTask(
                     phase: 'run',
                     conversationId,
                     nudges: nudges + 1,
+                    ...(deadline === undefined ? {} : { deadline }),
                     ...(worktree ? { worktree } : {}),
                     ...(turn ? { turn } : {})
                   }
@@ -286,11 +393,22 @@ export function createAgentTask(
       },
       paused: async (task, runtime, context) => {
         const input = task.input;
-        const { conversationId, nudges, turn, worktree } = task.state.checkpoint;
+        const { conversationId, nudges, turn, worktree, deadline } = task.state.checkpoint;
         const id = conversationId as ConversationId;
         let state = await runtime.snapshot(WorkflowPauseDoc, id, context);
         while (state?.paused) {
-          await sleep(PAUSE_POLL_MS, runtime.signal);
+          if (deadline !== undefined && runtime.now() >= deadline) {
+            const handle = await runtime.conversation(id, context);
+            await handle?.abort(context);
+            await failTimedOutAgent(runtime, task, context);
+            return;
+          }
+          await sleep(
+            deadline === undefined
+              ? PAUSE_POLL_MS
+              : Math.min(PAUSE_POLL_MS, Math.max(0, deadline - runtime.now())),
+            runtime.signal
+          );
           if (runtime.signal.aborted) return;
           state = await runtime.snapshot(WorkflowPauseDoc, id, context);
         }
@@ -320,6 +438,7 @@ export function createAgentTask(
               nudges,
               turn: turn + 1,
               message,
+              ...(deadline === undefined ? {} : { deadline }),
               ...(worktree ? { worktree } : {})
             }
           };
@@ -356,6 +475,78 @@ type AgentRuntime = TaskRuntime<
 >;
 
 type AgentTaskState = { input: WorkflowAgentInput; state: { checkpoint: AgentCheckpoint } };
+
+function prepareRoleAgent(
+  services: WorkflowTaskServices,
+  input: WorkflowAgentInput,
+  output?: Extension
+): Extension | undefined {
+  if (input.role === undefined && input.resolvedRole === undefined) return undefined;
+  if (!services.roles)
+    throw new WorkflowRoleError(
+      'role enforcement is unavailable; enable host role services before resuming this task'
+    );
+  const extension = services.roles.prepare(
+    { ...input, executionId: workflowRoleExecutionId(input) },
+    output
+  );
+  services.install(extension);
+  return extension;
+}
+
+async function failRoleAgent(
+  runtime: AgentRuntime,
+  task: AgentTaskState,
+  context: Context,
+  error: unknown
+): Promise<void> {
+  if (runtime.signal.aborted) throw error;
+  const checkpoint = task.state.checkpoint;
+  if (checkpoint.phase !== 'start') {
+    const handle = await runtime.conversation(checkpoint.conversationId as ConversationId, context);
+    await handle?.abort(context);
+  }
+  const usage =
+    checkpoint.phase === 'start'
+      ? (emptyUsage() as StoredUsage)
+      : (sumUsageState(
+          await runtime.snapshot(UsageDoc, checkpoint.conversationId as ConversationId, context)
+        ) as StoredUsage);
+  await finishAgent(runtime, task, context, {
+    status: 'failed',
+    error: { message: errorText(error), detail: { kind: 'workflow-role' } },
+    result: {
+      value: null,
+      usage,
+      ...(checkpoint.phase === 'start' ? {} : { conversationId: checkpoint.conversationId })
+    }
+  });
+}
+
+async function failTimedOutAgent(
+  runtime: AgentRuntime,
+  task: AgentTaskState,
+  context: Context
+): Promise<void> {
+  const checkpoint = task.state.checkpoint;
+  const usage =
+    checkpoint.phase === 'start'
+      ? (emptyUsage() as StoredUsage)
+      : (sumUsageState(
+          await runtime.snapshot(UsageDoc, checkpoint.conversationId as ConversationId, context)
+        ) as StoredUsage);
+  await finishAgent(runtime, task, context, {
+    status: 'failed',
+    error: {
+      message: `subagent execution time limit exhausted (${task.input.timeoutMs}ms); extend the task limit explicitly`
+    },
+    result: {
+      value: null,
+      usage,
+      ...(checkpoint.phase === 'start' ? {} : { conversationId: checkpoint.conversationId })
+    }
+  });
+}
 
 async function failWorktreeAgent(
   runtime: AgentRuntime,
@@ -453,6 +644,23 @@ function detailText(settled: { detail?: JsonValue }): string {
   if (settled.detail === undefined || settled.detail === null) return '';
   const text = typeof settled.detail === 'string' ? settled.detail : JSON.stringify(settled.detail);
   return text ? ` (${text.length > 400 ? `${text.slice(0, 399)}…` : text})` : '';
+}
+
+/** Long deadlines are rearmed instead of being truncated to Node's maximum timer delay. */
+function armDeadline(
+  deadline: number | undefined,
+  now: () => number,
+  expire: () => void
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    if (deadline === undefined) return;
+    const remaining = deadline - now();
+    if (remaining <= 0) expire();
+    else timer = setTimeout(arm, Math.min(2_147_483_647, remaining));
+  };
+  arm();
+  return () => clearTimeout(timer);
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

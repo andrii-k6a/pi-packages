@@ -748,7 +748,7 @@ test('createWorkflowTool exposes profile names and descriptions without routing 
     guidance,
     /profile: "<profile-name>".*phase\("Review", \{ profile: "<profile-name>" \}\).*agent\("\.\.\.", \{ profile: "<profile-name>" \}\)/s
   );
-  assert.match(guidance, /agent > phase > workflow > active session/);
+  assert.match(guidance, /agent > phase > workflow > role fallback > active session/);
   assert.match(guidance, /`phase\("Next phase"\)` without `profile` resets routing/);
   assert.match(guidance, /`meta\.phases` is documentation only/);
   assert.doesNotMatch(guidance, /SENTINEL_PROVIDER|SENTINEL_RAW_MODEL|xhigh|high/);

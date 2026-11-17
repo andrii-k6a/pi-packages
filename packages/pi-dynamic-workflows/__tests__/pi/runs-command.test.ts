@@ -930,7 +930,7 @@ test('x cancels a paused agent, which is not busy', async () => {
   expect(host.cancelAgent).toHaveBeenCalledWith('run-1', 7);
 });
 
-test('the run view marks a paused agent and shows its retained worktree identity', () => {
+test('the run view shows pause, retained worktree, and role identity separately from model routing', () => {
   const lines = renderRunDetailLines(
     {
       ...report,
@@ -953,6 +953,10 @@ test('the run view marks a paused agent and shows its retained worktree identity
               prompt: 'p',
               conversationId: 7,
               paused: true,
+              role: 'api-reviewer',
+              rolePolicy: 'policy-sha256',
+              profile: 'thorough',
+              model: 'provider/review-model',
               worktree: {
                 repoRoot: '/repo',
                 commonDir: '/repo/.git',
@@ -974,4 +978,10 @@ test('the run view marks a paused agent and shows its retained worktree identity
   assert.ok(lines.includes('   branch pi/workflow/worker'));
   assert.ok(lines.includes('   worktree /repo/.git/pi-workflow-worktrees/worker'));
   assert.ok(lines.includes('   agent cwd /repo/.git/pi-workflow-worktrees/worker/src'));
+  assert.ok(
+    lines.some((line) => line.includes('role api-reviewer') && line.includes('profile thorough'))
+  );
+  assert.ok(lines.includes('   role api-reviewer'));
+  assert.ok(lines.includes('   role policy policy-sha256'));
+  assert.ok(lines.includes('   model provider/review-model'));
 });

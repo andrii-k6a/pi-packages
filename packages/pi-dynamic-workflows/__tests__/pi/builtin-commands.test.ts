@@ -48,6 +48,8 @@ beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'workflow-builtin-command-'));
   cwd = join(directory, 'repo');
   await exec('git', ['init', '-q', cwd]);
+  await exec('git', ['config', 'user.name', 'Test'], { cwd });
+  await exec('git', ['config', 'user.email', 'test@example.com'], { cwd });
   await writeFile(join(cwd, filename), 'const value = 1;\n');
   await writeFile(join(cwd, 'other.ts'), 'const other = 1;\n');
   await exec('git', ['add', '.'], { cwd });
@@ -105,8 +107,8 @@ beforeEach(async () => {
   } as unknown as ExtensionCommandContext;
   pi = {
     registerCommand(name, definition) {
-      assert.equal(name, 'code-review');
-      command = definition;
+      assert.ok(['code-review', 'sdlc'].includes(name));
+      if (name === 'code-review') command = definition;
     },
     appendEntry: (name, data) => {
       session.appendCustomEntry(name, data);

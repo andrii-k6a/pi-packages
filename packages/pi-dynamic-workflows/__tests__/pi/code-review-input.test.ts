@@ -20,6 +20,8 @@ beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'review-capture-'));
   cwd = join(directory, 'repo');
   await exec('git', ['init', '-q', cwd]);
+  await git('config', 'user.name', 'Test');
+  await git('config', 'user.email', 'test@example.com');
   await writeFile(join(cwd, 'tracked.ts'), 'old\n');
   await writeFile(join(cwd, 'other.ts'), 'old\n');
   await writeFile(join(cwd, '.gitignore'), 'ignored/\n');

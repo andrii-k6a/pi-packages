@@ -96,7 +96,7 @@ test('the extension registers the built-in review command alongside its existing
   const { pi } = setup(interrupted);
   assert.deepEqual(
     vi.mocked(pi.registerCommand).mock.calls.map(([name]) => name),
-    ['code-review', 'workflow-profiles', 'workflows']
+    ['code-review', 'sdlc', 'workflow-profiles', 'workflows']
   );
 });
 
