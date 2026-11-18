@@ -35,6 +35,9 @@ Prompt templates are single Markdown files in `prompts/`. The filename is the sl
 pi install git:github.com/andrii-k6a/pi-packages
 ```
 
+The root `package.json` uses `allowScripts` to approve required dependency install scripts
+for npm versions that block them by default.
+
 Or try without installing:
 
 ```bash
