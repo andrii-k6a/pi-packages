@@ -19,6 +19,7 @@ Pi packages can include extensions, skills, prompt templates, and themes. See th
 | [searxng](./skills/searxng/) | Skill | Discover sources through local SearXNG search |
 | [defuddle](./skills/defuddle/) | Skill | Read static web pages as clean Markdown |
 | [crawl4ai](./skills/crawl4ai/) | Skill | Read rendered pages and crawl sites with a local browser |
+| [jev](./skills/jev/) | Skill | Label, score, and rank many items with the Jev classifier through `codemode` |
 | [assistant](./prompts/assistant.md) | Prompt | Treat the session as a general-purpose personal assistant |
 | [discuss](./prompts/discuss.md) | Prompt | Compare options without changing files or external state |
 | [implement](./prompts/implement.md) | Prompt | Complete the agreed task and check the result |
